@@ -84,6 +84,25 @@ REPL の編集機能（`chzyer/readline`）:
 - **Ctrl-R**：履歴の逆引き検索（大文字小文字無視）
 - **行編集**：←→ / Home/End / Ctrl-A・E・U・W 等、**Ctrl-C** で行クリア（空行で終了）、**Ctrl-D** で終了
 
+### daemon（常駐・タッチ反応・即時コマンド）
+
+`daemon` は gateway を**常駐**させ、(1) 頭部タッチに**自動反応**し、(2) ローカル IPC
+（`127.0.0.1:8770`）で `stackchan-cli <cmd>` を**即時転送**する（gateway 再起動なし＝~0.04s、
+ポート競合も解消）。
+
+```
+stackchan-cli daemon            # 常駐起動（Ctrl-C で停止）
+# 別ターミナルから（daemon があれば自動で転送される）:
+stackchan-cli avatar happy
+stackchan-cli say "やっほー"
+```
+
+- **タッチ反応**：頭部センサ（zone0/1/2）に触れると tap/stroke を検知して反応。
+  既定は stroke→照れ顔＋ピンク LED＋「えへへ、なでられるの好き。」、tap→驚き＋青 LED＋「わっ、なあに？」。
+  `daemon --touch-poll 0` で無効、`--touch-poll <ms>` で間隔変更。反応内容は `daemon.go` の
+  `reactToGesture` を編集。
+- daemon 稼働中は one-shot コマンドが自動で IPC 転送される（`repl` は未対応＝daemon 停止中に使う）。
+
 ### スクリプト / 演出
 
 REPL とスクリプトでは次のメタコマンドが使えます：

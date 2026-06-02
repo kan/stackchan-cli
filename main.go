@@ -25,6 +25,11 @@ import (
 	"stackchan-cli/internal/mcp"
 )
 
+// out is where command *results* are written. Normally os.Stdout; the daemon
+// temporarily redirects it (under execMu) to an IPC client connection so a
+// forwarded command's output reaches that client.
+var out io.Writer = os.Stdout
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -49,9 +54,24 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case "daemon":
+		if err := cmdDaemon(args); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
-	// one-shot: nil client => each handler spawns its own gateway.
+	// If a daemon is running, forward to it (fast; reuses its resident gateway,
+	// avoiding a second gateway / port conflict). Otherwise spawn a one-shot
+	// gateway per command.
+	if forwarded, err := forwardToDaemon(os.Args[1:]); forwarded {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := dispatch(cmd, args, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
@@ -105,6 +125,7 @@ Usage:
   stackchan-cli <command> [flags]
   stackchan-cli repl                  Interactive session (gateway stays resident; fast)
   stackchan-cli source <file>         Run a script file (sleep/repeat/# comments) in one session
+  stackchan-cli daemon                Resident gateway: touch reactions + fast command forwarding
 
 Commands:
   status                 Show gateway/device connection status (no device needed)
@@ -235,7 +256,7 @@ func callAndPrint(verbose, waitDevice bool, tool string, args map[string]any, ou
 		if err != nil {
 			return err
 		}
-		fmt.Println(res.Text())
+		fmt.Fprintln(out, res.Text())
 		if res.IsError {
 			return fmt.Errorf("tool %s reported an error", tool)
 		}
@@ -298,7 +319,7 @@ func cmdTools(args []string, c *mcp.Client) error {
 				Required []string `json:"required"`
 			}
 			_ = json.Unmarshal(t.InputSchema, &schema)
-			fmt.Printf("%-24s %v\n", t.Name, schema.Required)
+			fmt.Fprintf(out, "%-24s %v\n", t.Name, schema.Required)
 		}
 		fmt.Fprintf(os.Stderr, "\n%d tools\n", len(tools))
 		return nil
@@ -486,7 +507,7 @@ func cmdSay(args []string, c *mcp.Client) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(res.Text())
+		fmt.Fprintln(out, res.Text())
 		if res.IsError {
 			return fmt.Errorf("say reported an error")
 		}
@@ -520,7 +541,7 @@ func cmdPhoto(args []string, c *mcp.Client) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println(res.Text())
+		fmt.Fprintln(out, res.Text())
 		if res.IsError {
 			return fmt.Errorf("take_photo reported an error")
 		}
@@ -529,7 +550,7 @@ func cmdPhoto(args []string, c *mcp.Client) error {
 			fmt.Fprintf(os.Stderr, "(image not located; check %s)\n", capturesDir())
 			return nil
 		}
-		fmt.Printf("photo saved: %s\n", path)
+		fmt.Fprintf(out, "photo saved: %s\n", path)
 		if *open {
 			openInViewer(path)
 		}
@@ -804,7 +825,7 @@ func pcItems(names ...string) []readline.PrefixCompleterInterface {
 }
 
 func replHelp() {
-	fmt.Println(`commands (device stays connected; runs instantly):
+	fmt.Fprintln(out, `commands (device stays connected; runs instantly):
   status                         connection status
   tools                          list gateway tools
   avatar <face>                  idle|happy|thinking|sad|surprised|embarrassed|off

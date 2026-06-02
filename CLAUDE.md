@@ -385,6 +385,21 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - gateway 子プロセスは新版で **`serve`（既定 `--transport stdio`）** 起動（CLI 実装済み）。
 - esptool hard-reset 後に画面が黒いことがある（USB DTR がブートモード保持）。**電源 OFF→ON で正常起動**。
 
+## stage-3 daemon + タッチ反応log（2026-06-02・成功）
+- `daemon.go`: gateway を常駐保持し ①頭部タッチに自動反応 ②`127.0.0.1:8770` の TCP IPC で
+  `stackchan-cli <cmd>` を即時転送（**~0.04s**、gateway 再起動・ポート競合なし）。
+- 出力配線: main.go に `var out io.Writer = os.Stdout`。結果 print を `out` 経由に。
+  daemon は `withOutput(w, fn)`（`execMu` で直列化）で out を IPC conn / stderr に切替。
+- 転送: main() の one-shot 経路で `forwardToDaemon(os.Args[1:])` を試行→ daemon があれば送信、
+  無ければ従来の自前 gateway 起動にフォールバック。`quoteArgs` で空白入り引数を再クォート。
+- タッチ検知: `get_touch_state` を `--touch-poll`(既定300ms) で監視。返り値
+  `{zone0/1/2:bool, raw, last_event:"tap|stroke|idle", last_event_age_ms}`。
+  **新イベント = age が前回より減少（リセット）**で判定、2s デバウンス。`reactToGesture` で反応。
+- **実機知見**: ヘッドタッチは **zone0/1/2 の特定スポット**に当てないと反応しない（raw=0/zone false の
+  ままだと検知しない）。zone0 に当たると `raw` 立ち＋`last_event_age_ms` リセット→反応。
+  最初「無反応」だったのは触る位置がセンサを外していたため（センサ自体は正常）。
+- 注意: daemon 稼働中は `repl` 非対応（自前 gateway 起動で競合）。one-shot 転送を使う。
+
 ## TTS（発話）セットアップlog（2026-06-02・成功）
 - `say` = gateway が **VOICEVOX で合成 → Opus 化 → WS でデバイスへ送出 → スピーカー再生**（ファーム変更不要）。
 - **GitHub main 版 gateway は VOICEVOX エンジン実装内蔵**（`tts/voicevox.py`、起動時自動登録）。
