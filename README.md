@@ -39,7 +39,7 @@ go build -o stackchan-cli .
 ```bash
 # 環境変数（トークンは空＝認証なしでも可。写真用に自機 LAN IP を指定）
 export STACKCHAN_TOKEN=        # 省略可
-export VISION_HOST=<PC-LAN-IP> # take_photo 用
+export VISION_HOST=<PC-LAN-IP> # take_photo 用（未設定なら CLI が LAN IP を自動検出）
 
 ./stackchan-cli status                       # gateway/デバイス接続状態（デバイス不要）
 ./stackchan-cli tools                        # 公開ツール一覧（デバイス不要）
@@ -48,7 +48,7 @@ export VISION_HOST=<PC-LAN-IP> # take_photo 用
 ./stackchan-cli move-head --yaw 30 --pitch 40
 ./stackchan-cli all-leds --r 0 --g 0 --b 255
 ./stackchan-cli led --index 0 --r 255 --g 0 --b 0
-./stackchan-cli photo --question "何が見える？" --open  # 撮影→ ~/.stackchan/captures に保存し既定ビューアで表示（要 VISION_HOST）
+./stackchan-cli photo --question "何が見える？" --open  # 撮影→ ~/.stackchan/captures に保存し既定ビューアで表示（VISION_HOST は未設定なら自動検出）
 ./stackchan-cli call <tool> --json '{"...":"..."}'   # 任意ツールを生 JSON で
 ```
 

@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +103,7 @@ Commands:
 Environment:
   STACKCHAN_MCP_EXE   path to the gateway executable (default: PATH / ~/.local/bin)
   STACKCHAN_TOKEN     bearer token shared with the firmware (empty = no auth)
-  VISION_HOST         this host's LAN IP, required for 'photo'
+  VISION_HOST         this host's LAN IP for 'photo' (auto-detected if unset)
 
 Per-command flags:
   --verbose           forward the gateway's stderr logs (one-shot mode)
@@ -161,7 +162,32 @@ func gatewayEnv() []string {
 	if os.Getenv("STACKCHAN_TOKEN") == "" {
 		fmt.Fprintln(os.Stderr, "note: STACKCHAN_TOKEN not set; gateway accepts any client (no auth). This matches a firmware with an empty websocket.token.")
 	}
+	// take_photo needs the device to POST the JPEG back to this host. If the
+	// user hasn't pinned VISION_HOST/VISION_URL, auto-detect this machine's LAN
+	// IP so photo works out of the box (override by setting VISION_HOST).
+	if os.Getenv("VISION_HOST") == "" && os.Getenv("VISION_URL") == "" {
+		if ip := localLANIP(); ip != "" {
+			fmt.Fprintf(os.Stderr, "note: VISION_HOST not set; using auto-detected LAN IP %s (set VISION_HOST to override).\n", ip)
+			env = append(env, "VISION_HOST="+ip)
+		}
+	}
 	return env
+}
+
+// localLANIP returns this host's primary LAN IPv4 by inspecting which local
+// address the OS would use to reach an external host. No packets are sent (UDP
+// "connect" only resolves the route), so it works offline as long as a default
+// route exists. Returns "" if it can't be determined.
+func localLANIP() string {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	if a, ok := conn.LocalAddr().(*net.UDPAddr); ok {
+		return a.IP.String()
+	}
+	return ""
 }
 
 // callAndPrint runs one tool and prints its text result. In one-shot mode
