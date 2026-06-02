@@ -392,12 +392,13 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   daemon は `withOutput(w, fn)`（`execMu` で直列化）で out を IPC conn / stderr に切替。
 - 転送: main() の one-shot 経路で `forwardToDaemon(os.Args[1:])` を試行→ daemon があれば送信、
   無ければ従来の自前 gateway 起動にフォールバック。`quoteArgs` で空白入り引数を再クォート。
-- タッチ検知: `get_touch_state` を `--touch-poll`(既定300ms) で監視。返り値
-  `{zone0/1/2:bool, raw, last_event:"tap|stroke|idle", last_event_age_ms}`。
-  **新イベント = age が前回より減少（リセット）**で判定、2s デバウンス。`reactToGesture` で反応。
-- **実機知見**: ヘッドタッチは **zone0/1/2 の特定スポット**に当てないと反応しない（raw=0/zone false の
-  ままだと検知しない）。zone0 に当たると `raw` 立ち＋`last_event_age_ms` リセット→反応。
-  最初「無反応」だったのは触る位置がセンサを外していたため（センサ自体は正常）。
+- タッチ検知: `get_touch_state` を `--touch-poll`(既定150ms) で監視。返り値
+  `{zone0/1/2:bool, raw, last_event, last_event_age_ms}`。**ファームの tap/stroke ラベルは
+  stroke に偏る**ので使わず、`raw>0||zone*` の**接触時間で自前分類**：release≤1s=tap /
+  それ超=stroke、1.8s ホールドで接触中に stroke 発火。2s デバウンス（`touchWatch`）。
+- **実機知見**: ①ヘッドタッチは **zone0/1/2 の特定スポット**に**手のひらで大きく覆う**と発動しやすい
+  （指先のなで/位置ズレだと raw=0 のまま無反応＝センサ自体は正常）。②ファーム分類は stroke 偏重 →
+  接触時間ベースの自前判定で tap/stroke を出し分け可能に。tap 上限は 1s が体感良。
 - 注意: daemon 稼働中は `repl` 非対応（自前 gateway 起動で競合）。one-shot 転送を使う。
 
 ## TTS（発話）セットアップlog（2026-06-02・成功）

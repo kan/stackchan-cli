@@ -39,7 +39,7 @@ func withOutput(w io.Writer, fn func()) {
 func cmdDaemon(args []string) error {
 	set, verbose := fs("daemon")
 	connectTimeout := set.Int("connect-timeout", 90, "seconds to wait for the device on startup")
-	pollMs := set.Int("touch-poll", 300, "touch poll interval in ms (0 disables touch reactions)")
+	pollMs := set.Int("touch-poll", 150, "touch poll interval in ms (0 disables touch reactions)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -111,10 +111,19 @@ func handleConn(conn net.Conn, c *mcp.Client) {
 	})
 }
 
-// touchWatch polls get_touch_state and reacts to fresh tap/stroke gestures.
+// touchWatch polls get_touch_state and classifies the gesture by *contact
+// duration* (the firmware's own tap/stroke label skews heavily to "stroke"):
+// a short cover-and-release is a tap; a longer hold is a stroke. Reacting on
+// release (or after a long hold) makes both reliable with a palm-sized touch.
 func touchWatch(c *mcp.Client, interval time.Duration, stop <-chan struct{}) {
-	prevAge := -1
+	const tapMax = 1000 * time.Millisecond     // release within this => tap
+	const strokeHold = 1800 * time.Millisecond // held this long => stroke mid-contact
+	const cooldown = 2 * time.Second
+
+	var touchStart time.Time // zero = not currently touching
+	reacted := false         // already reacted for the current contact
 	lastReact := time.Time{}
+
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -128,21 +137,41 @@ func touchWatch(c *mcp.Client, interval time.Duration, stop <-chan struct{}) {
 			continue
 		}
 		var s struct {
-			Available bool   `json:"available"`
-			LastEvent string `json:"last_event"`
-			AgeMs     int    `json:"last_event_age_ms"`
+			Available bool `json:"available"`
+			Zone0     bool `json:"zone0"`
+			Zone1     bool `json:"zone1"`
+			Zone2     bool `json:"zone2"`
+			Raw       int  `json:"raw"`
 		}
 		if json.Unmarshal([]byte(res.Text()), &s) != nil || !s.Available {
 			continue
 		}
-		// A fresh event re-fired when the age counter drops vs the last poll.
-		fresh := prevAge >= 0 && s.AgeMs < prevAge && s.LastEvent != "idle"
-		prevAge = s.AgeMs
-		if !fresh || time.Since(lastReact) < 2*time.Second {
-			continue
+		active := s.Raw > 0 || s.Zone0 || s.Zone1 || s.Zone2
+		now := time.Now()
+
+		switch {
+		case active && touchStart.IsZero(): // rising edge
+			touchStart = now
+			reacted = false
+		case active && !reacted && now.Sub(touchStart) >= strokeHold: // long hold
+			if now.Sub(lastReact) >= cooldown {
+				lastReact = now
+				reacted = true
+				reactToGesture(c, "stroke")
+			}
+		case !active && !touchStart.IsZero(): // falling edge (release)
+			dur := now.Sub(touchStart)
+			touchStart = time.Time{}
+			if !reacted && now.Sub(lastReact) >= cooldown {
+				lastReact = now
+				if dur <= tapMax {
+					reactToGesture(c, "tap")
+				} else {
+					reactToGesture(c, "stroke")
+				}
+			}
+			reacted = false
 		}
-		lastReact = time.Now()
-		reactToGesture(c, s.LastEvent)
 	}
 }
 
