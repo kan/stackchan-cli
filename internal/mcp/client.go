@@ -233,11 +233,22 @@ func (c *Client) CallTool(name string, args map[string]any) (ToolResult, error) 
 }
 
 // Close terminates the gateway child process.
+// Close shuts the gateway down gracefully: closing stdin signals EOF to the
+// stdio MCP server, which lets the gateway flush pending WebSocket writes and
+// close the device connection cleanly (so the device leaves the "speaking"
+// state and stops lip-sync, rather than being left hanging by an abrupt kill).
+// If it doesn't exit promptly, fall back to killing it.
 func (c *Client) Close() error {
 	_ = c.stdin.Close()
-	if c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
+	done := make(chan error, 1)
+	go func() { done <- c.cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		if c.cmd.Process != nil {
+			_ = c.cmd.Process.Kill()
+		}
+		<-done
 	}
-	_ = c.cmd.Wait()
 	return nil
 }
