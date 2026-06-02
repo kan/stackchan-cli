@@ -102,7 +102,8 @@ stackchan-cli say "やっほー"
 - **反応は編集可能なスクリプト**：daemon 初回起動時に `~/.stackchan/reactions/tap.txt` と `stroke.txt`
   を雛形生成。中身は REPL コマンド（`avatar`/`mouth`/`led`/`say`/`sleep` など）を行で並べるだけ。
   **再ビルド不要**で、ジェスチャ発火時にその場のファイル内容が実行される（`--reactions <dir>` で場所変更）。
-- daemon 稼働中は one-shot コマンドが自動で IPC 転送される（`repl` は未対応＝daemon 停止中に使う）。
+- daemon 稼働中は **one-shot も `repl` も**自動で IPC 転送される（その常駐 gateway を共有。
+  `repl` は daemon があれば各行を転送、無ければ自前 gateway を起動）。
 
 ### スクリプト / 演出
 

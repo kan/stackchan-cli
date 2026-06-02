@@ -242,22 +242,41 @@ func fileExists(p string) bool {
 	return err == nil && !info.IsDir()
 }
 
-// forwardToDaemon sends argv to a running daemon and copies the reply to stdout.
-// Returns (false, nil) when no daemon is listening (caller falls back).
-func forwardToDaemon(argv []string) (bool, error) {
+// daemonAvailable reports whether a daemon is listening on the IPC port.
+func daemonAvailable() bool {
 	conn, err := net.DialTimeout("tcp", ipcAddr, 250*time.Millisecond)
 	if err != nil {
-		return false, nil
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// sendToDaemon sends one command line to a running daemon and copies the reply
+// to stdout. Errors if no daemon is reachable.
+func sendToDaemon(line string) error {
+	conn, err := net.DialTimeout("tcp", ipcAddr, time.Second)
+	if err != nil {
+		return err
 	}
 	defer conn.Close()
-	if _, err := fmt.Fprintf(conn, "%s\n", quoteArgs(argv)); err != nil {
-		return true, err
+	if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
+		return err
 	}
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
 	}
 	_, err = io.Copy(os.Stdout, conn)
-	return true, err
+	return err
+}
+
+// forwardToDaemon sends argv to a running daemon (one-shot path). Returns
+// (false, nil) when no daemon is listening so the caller can fall back.
+func forwardToDaemon(argv []string) (bool, error) {
+	if !daemonAvailable() {
+		return false, nil
+	}
+	return true, sendToDaemon(quoteArgs(argv))
 }
 
 // quoteArgs rebuilds a command line, quoting tokens that contain whitespace so

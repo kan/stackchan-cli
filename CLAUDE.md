@@ -404,7 +404,9 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   **再ビルド不要**で発火時に都度読む。`--reactions <dir>` で場所変更。`reactToGesture`/`seedReactions`。
 - 運用注意: daemon の再起動時は **gateway 子プロセス(8765/8766) が完全に落ちてから**でないと
   次の gateway が "closed stdout" で失敗する。ポート(8765/8766/8770)空きを確認してから起動。
-- 注意: daemon 稼働中は `repl` 非対応（自前 gateway 起動で競合）。one-shot 転送を使う。
+- daemon 稼働中は **one-shot も `repl` も IPC 転送**（共通 `sendToDaemon`）。`repl` は起動時に
+  `daemonAvailable()` を見て、あれば各行を転送（`replLoop(remote=true)`）、無ければ自前 gateway。
+  ※ readline は非 TTY（パイプ）だと行を読まない＝対話端末でのみ。one-shot のパイプ/スクリプトは従来どおり。
 
 ## TTS（発話）セットアップlog（2026-06-02・成功）
 - `say` = gateway が **VOICEVOX で合成 → Opus 化 → WS でデバイスへ送出 → スピーカー再生**（ファーム変更不要）。

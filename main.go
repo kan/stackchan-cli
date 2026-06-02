@@ -625,6 +625,12 @@ func cmdRepl(args []string) error {
 	if err := set.Parse(args); err != nil {
 		return err
 	}
+	// If a daemon is running, forward each line to its resident gateway instead
+	// of spawning a second one (which would conflict on the gateway ports).
+	if daemonAvailable() {
+		fmt.Fprintln(os.Stderr, "repl: a daemon is running — forwarding commands to its gateway")
+		return replLoop(nil, true, nil)
+	}
 	return withClient(*verbose, func(c *mcp.Client) error {
 		fmt.Fprintln(os.Stderr, "gateway up; waiting for device to connect...")
 		if err := waitConnected(c, time.Duration(*connectTimeout)*time.Second); err != nil {
@@ -632,45 +638,70 @@ func cmdRepl(args []string) error {
 		} else {
 			fmt.Println("device connected ✓")
 		}
-		fmt.Println("type 'help' for commands, 'quit' to exit  (Tab completes · ↑ history · Ctrl-R search)")
+		var toolNames []string
+		if tools, err := c.ListTools(); err == nil {
+			for _, t := range tools {
+				toolNames = append(toolNames, t.Name)
+			}
+		}
+		return replLoop(c, false, toolNames)
+	})
+}
 
-		rl, err := readline.NewEx(&readline.Config{
-			Prompt:            "stackchan> ",
-			HistoryFile:       replHistoryFile(),
-			AutoComplete:      buildCompleter(c),
-			InterruptPrompt:   "^C",
-			EOFPrompt:         "quit",
-			HistorySearchFold: true, // case-insensitive Ctrl-R
-		})
-		if err != nil {
+// replLoop runs the interactive prompt. Local mode (remote=false) executes each
+// line against c; remote mode forwards each line to the running daemon. quit /
+// exit are always handled locally.
+func replLoop(c *mcp.Client, remote bool, toolNames []string) error {
+	fmt.Println("type 'help' for commands, 'quit' to exit  (Tab completes · ↑ history · Ctrl-R search)")
+	rl, err := readline.NewEx(&readline.Config{
+		Prompt:            "stackchan> ",
+		HistoryFile:       replHistoryFile(),
+		AutoComplete:      buildCompleter(toolNames),
+		InterruptPrompt:   "^C",
+		EOFPrompt:         "quit",
+		HistorySearchFold: true, // case-insensitive Ctrl-R
+	})
+	if err != nil {
+		return err
+	}
+	defer rl.Close()
+
+	for {
+		line, err := rl.Readline()
+		switch err {
+		case readline.ErrInterrupt: // Ctrl-C: clear line, or exit if already empty
+			if strings.TrimSpace(line) == "" {
+				return nil
+			}
+			continue
+		case io.EOF: // Ctrl-D
+			return nil
+		case nil:
+		default:
 			return err
 		}
-		defer rl.Close()
 
-		for {
-			line, err := rl.Readline()
-			switch err {
-			case readline.ErrInterrupt: // Ctrl-C: clear line, or exit if already empty
-				if strings.TrimSpace(line) == "" {
-					return nil
-				}
-				continue
-			case io.EOF: // Ctrl-D
-				return nil
-			case nil:
-			default:
-				return err
-			}
-
-			stop, derr := runLine(line, c)
-			if derr != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", derr)
-			}
-			if stop {
-				return nil
-			}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
 		}
-	})
+		if w := strings.Fields(trimmed)[0]; w == "quit" || w == "exit" || w == "q" {
+			return nil
+		}
+		if remote {
+			if err := sendToDaemon(trimmed); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v (daemon gone?)\n", err)
+			}
+			continue
+		}
+		stop, derr := runLine(line, c)
+		if derr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", derr)
+		}
+		if stop {
+			return nil
+		}
+	}
 }
 
 // runLine executes one REPL/script line against client c. It handles blank /
@@ -780,17 +811,9 @@ func replHistoryFile() string {
 }
 
 // buildCompleter builds Tab completion for command names, avatar faces, common
-// flags, and (for `call`) the gateway's advertised tool names.
-func buildCompleter(c *mcp.Client) *readline.PrefixCompleter {
+// flags, and (for `call`) the given tool names (may be nil in remote/daemon mode).
+func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 	faces := pcItems("idle", "happy", "thinking", "sad", "surprised", "embarrassed", "off")
-
-	var toolNames []string
-	if tools, err := c.ListTools(); err == nil {
-		for _, t := range tools {
-			toolNames = append(toolNames, t.Name)
-		}
-	}
-
 	return readline.NewPrefixCompleter(
 		readline.PcItem("status"),
 		readline.PcItem("tools"),
