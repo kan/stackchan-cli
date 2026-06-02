@@ -16,7 +16,7 @@ stackchan-cli (Go)  --stdio MCP-->  stackchan-mcp gateway (Python)  --WebSocket-
 
 - CLI は gateway を**子プロセス起動**し、`initialize` → `tools/call` を stdin/stdout で送受信。
 - gateway は WebSocket サーバ(:8765) を持ち、デバイスがそこへ接続してくる。
-- 依存ゼロ（Go 標準ライブラリのみ）。
+- 依存は最小限（CLI 本体は標準ライブラリのみ。REPL の補完/履歴に `chzyer/readline` を使用）。
 
 ## 前提
 
@@ -72,6 +72,12 @@ export VISION_HOST=<PC-LAN-IP> # take_photo 用（未設定なら CLI が LAN IP
 
 `"..."` / `'...'` のクォートが使えるので `say "hello world"` や
 `call <tool> --json '{"k":"v"}'` もそのまま入力できます。
+
+REPL の編集機能（`chzyer/readline`）:
+- **Tab 補完**：コマンド名・`avatar` の face 名・主要フラグ・`call` のツール名
+- **履歴**：↑↓ で呼び出し、`~/.stackchan/repl_history` に永続化
+- **Ctrl-R**：履歴の逆引き検索（大文字小文字無視）
+- **行編集**：←→ / Home/End / Ctrl-A・E・U・W 等、**Ctrl-C** で行クリア（空行で終了）、**Ctrl-D** で終了
 
 ## 既知の制限
 

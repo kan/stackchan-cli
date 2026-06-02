@@ -9,7 +9,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chzyer/readline"
 	"stackchan-cli/internal/mcp"
 )
 
@@ -469,14 +469,38 @@ func cmdRepl(args []string) error {
 		} else {
 			fmt.Println("device connected ✓")
 		}
-		fmt.Println("type 'help' for commands, 'quit' to exit")
+		fmt.Println("type 'help' for commands, 'quit' to exit  (Tab completes · ↑ history · Ctrl-R search)")
 
-		in := bufio.NewScanner(os.Stdin)
-		fmt.Print("stackchan> ")
-		for in.Scan() {
-			line := strings.TrimSpace(in.Text())
+		rl, err := readline.NewEx(&readline.Config{
+			Prompt:            "stackchan> ",
+			HistoryFile:       replHistoryFile(),
+			AutoComplete:      buildCompleter(c),
+			InterruptPrompt:   "^C",
+			EOFPrompt:         "quit",
+			HistorySearchFold: true, // case-insensitive Ctrl-R
+		})
+		if err != nil {
+			return err
+		}
+		defer rl.Close()
+
+		for {
+			line, err := rl.Readline()
+			switch err {
+			case readline.ErrInterrupt: // Ctrl-C: clear line, or exit if already empty
+				if strings.TrimSpace(line) == "" {
+					return nil
+				}
+				continue
+			case io.EOF: // Ctrl-D
+				return nil
+			case nil:
+			default:
+				return err
+			}
+
+			line = strings.TrimSpace(line)
 			if line == "" {
-				fmt.Print("stackchan> ")
 				continue
 			}
 			toks := tokenize(line)
@@ -491,11 +515,50 @@ func cmdRepl(args []string) error {
 					fmt.Fprintf(os.Stderr, "error: %v\n", err)
 				}
 			}
-			fmt.Print("stackchan> ")
 		}
-		fmt.Println()
-		return in.Err()
 	})
+}
+
+func replHistoryFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".stackchan", "repl_history")
+}
+
+// buildCompleter builds Tab completion for command names, avatar faces, common
+// flags, and (for `call`) the gateway's advertised tool names.
+func buildCompleter(c *mcp.Client) *readline.PrefixCompleter {
+	faces := pcItems("idle", "happy", "thinking", "sad", "surprised", "embarrassed", "off")
+
+	var toolNames []string
+	if tools, err := c.ListTools(); err == nil {
+		for _, t := range tools {
+			toolNames = append(toolNames, t.Name)
+		}
+	}
+
+	return readline.NewPrefixCompleter(
+		readline.PcItem("status"),
+		readline.PcItem("tools"),
+		readline.PcItem("wait"),
+		readline.PcItem("avatar", faces...),
+		readline.PcItem("move-head", readline.PcItem("--yaw"), readline.PcItem("--pitch")),
+		readline.PcItem("led", readline.PcItem("--index"), readline.PcItem("--r"), readline.PcItem("--g"), readline.PcItem("--b")),
+		readline.PcItem("all-leds", readline.PcItem("--r"), readline.PcItem("--g"), readline.PcItem("--b")),
+		readline.PcItem("say"),
+		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
+		readline.PcItem("call", pcItems(toolNames...)...),
+		readline.PcItem("help"),
+		readline.PcItem("quit"),
+		readline.PcItem("exit"),
+	)
+}
+
+func pcItems(names ...string) []readline.PrefixCompleterInterface {
+	items := make([]readline.PrefixCompleterInterface, 0, len(names))
+	for _, n := range names {
+		items = append(items, readline.PcItem(n))
+	}
+	return items
 }
 
 func replHelp() {
