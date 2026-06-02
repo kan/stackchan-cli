@@ -385,6 +385,22 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - gateway 子プロセスは新版で **`serve`（既定 `--transport stdio`）** 起動（CLI 実装済み）。
 - esptool hard-reset 後に画面が黒いことがある（USB DTR がブートモード保持）。**電源 OFF→ON で正常起動**。
 
+## TTS（発話）セットアップlog（2026-06-02・成功）
+- `say` = gateway が **VOICEVOX で合成 → Opus 化 → WS でデバイスへ送出 → スピーカー再生**（ファーム変更不要）。
+- **GitHub main 版 gateway は VOICEVOX エンジン実装内蔵**（`tts/voicevox.py`、起動時自動登録）。
+  既定 URL `http://127.0.0.1:50021` / `STACKCHAN_VOICEVOX_URL` で上書き。既定話者 3（ずんだもん）。
+- 必要物: ①VOICEVOX エンジン起動(:50021) ②gateway に `opuslib`（`uv tool install --force --with opuslib ...`）
+  ③**Windows 用 `opus.dll`**（opuslib が `find_library('opus')` で PATH 探索）。
+  → **PyPI の PyOgg 同梱 libopus を流用**: `uv run --with pyogg python -c "...shutil.copy(pyogg/opus.dll, ~/.local/bin/opus.dll)"`。
+  検証: `opuslib.Encoder(16000,1,APPLICATION_VOIP).encode(...)` が通れば OK。`~/.local/bin` はユーザー PATH 上。
+- **口パクが止まらない不具合 → 修正済み**: one-shot が say 直後に gateway を Kill し、末尾の
+  `{"type":"tts","state":"stop"}`(=Speaking 解除) が届かず口パク継続。`mcp.Client.Close()` を
+  **グレースフル化**（stdin 閉→正常終了待ち、Kill は 2s フォールバック）で stop が flush され解決。
+  副次的に one-shot 終了が ~0.6s と高速化。
+- 個人設定（この CLI 既定）: **既定話者 8=春日部つむぎ**（`gatewayEnv` が `STACKCHAN_VOICEVOX_DEFAULT_SPEAKER=8` 注入、
+  env or `say --speaker N` で上書き）、**発話後に自動 `set_avatar embarrassed`**（`say --face <name>`/`--face ""` で変更/無効）。
+- 手順詳細: `docs/tts-voicevox.md`。話者一覧: `GET :50021/speakers`（ずんだもん3 / つむぎ8 / めたん2 等）。
+
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`
 - 公式デバイス: `firmware/main/apps/app_avatar/app_avatar.cpp`, `.../view/ws_call.cpp`,

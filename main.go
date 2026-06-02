@@ -119,7 +119,7 @@ Commands:
   clear-leds
   volume <0-100>
   brightness <0-100>
-  say <text>
+  say [--speaker N] <text>     speak via VOICEVOX (needs a running engine)
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
 
@@ -193,6 +193,11 @@ func gatewayEnv() []string {
 			fmt.Fprintf(os.Stderr, "note: VISION_HOST not set; using auto-detected LAN IP %s (set VISION_HOST to override).\n", ip)
 			env = append(env, "VISION_HOST="+ip)
 		}
+	}
+	// Personal default voice: 春日部つむぎ (VOICEVOX speaker 8). Override by
+	// setting STACKCHAN_VOICEVOX_DEFAULT_SPEAKER or passing `say --speaker N`.
+	if os.Getenv("STACKCHAN_VOICEVOX_DEFAULT_SPEAKER") == "" {
+		env = append(env, "STACKCHAN_VOICEVOX_DEFAULT_SPEAKER=8")
 	}
 	return env
 }
@@ -457,13 +462,43 @@ func cmdAllLEDs(args []string, c *mcp.Client) error {
 
 func cmdSay(args []string, c *mcp.Client) error {
 	set, verbose := fs("say")
+	speaker := set.Int("speaker", 0, "VOICEVOX speaker id (0 = gateway default; e.g. 3=ずんだもん, 8=春日部つむぎ)")
+	face := set.String("face", "embarrassed", "avatar face to set after speaking (\"\" = leave unchanged)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 	if set.NArg() < 1 {
-		return fmt.Errorf("say requires text")
+		return fmt.Errorf("say requires text (put flags first, e.g. say --speaker 8 \"...\")")
 	}
-	return callAndPrint(*verbose, true, "say", map[string]any{"text": strings.Join(set.Args(), " ")}, c)
+	sayArgs := map[string]any{"text": strings.Join(set.Args(), " ")}
+	if *speaker > 0 {
+		sayArgs["speaker_id"] = *speaker
+	}
+	oneShot := c == nil
+	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
+		if oneShot {
+			fmt.Fprintln(os.Stderr, "waiting for device to connect...")
+			if err := waitConnected(c, 90*time.Second); err != nil {
+				return err
+			}
+		}
+		res, err := c.CallTool("say", sayArgs)
+		if err != nil {
+			return err
+		}
+		fmt.Println(res.Text())
+		if res.IsError {
+			return fmt.Errorf("say reported an error")
+		}
+		// say() blocks until playback finishes, so the mouth has stopped by now;
+		// settle on a resting face.
+		if *face != "" {
+			if _, err := c.CallTool("set_avatar", map[string]any{"face": *face}); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: set_avatar %s failed: %v\n", *face, err)
+			}
+		}
+		return nil
+	})
 }
 
 func cmdPhoto(args []string, c *mcp.Client) error {
@@ -748,7 +783,7 @@ func buildCompleter(c *mcp.Client) *readline.PrefixCompleter {
 		readline.PcItem("clear-leds"),
 		readline.PcItem("volume"),
 		readline.PcItem("brightness"),
-		readline.PcItem("say"),
+		readline.PcItem("say", readline.PcItem("--speaker"), readline.PcItem("--face")),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
 		readline.PcItem("sleep"),
@@ -779,7 +814,7 @@ func replHelp() {
   led --index N --r N --g N --b N
   all-leds --r N --g N --b N  |  clear-leds
   volume <0-100>  |  brightness <0-100>
-  say <text>                     (needs gateway TTS extra)
+  say [--speaker N] <text>       speak via VOICEVOX (3=ずんだもん, 8=春日部つむぎ)
   photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
   sleep <ms>                     pause (for choreography)

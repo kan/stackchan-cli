@@ -105,7 +105,10 @@ stackchan-cli source examples/greet.txt
 
 - **one-shot 方式**：コマンド毎に gateway を起動/終了するため、デバイス再接続待ち（最大90s）で遅い。
   連続操作には **`repl`（gateway 常駐）** を使うと即時実行。daemon+IPC 化（バックグラウンド常駐）は今後の課題。
-- `say` / `listen`（TTS/STT）は gateway 側に optional extra を入れるまで使えません。
+- `say`（TTS）は VOICEVOX エンジン稼働＋gateway に opuslib（+Windows は opus.dll）が要る。
+  セットアップは [`docs/tts-voicevox.md`](docs/tts-voicevox.md)。既定話者は 8=春日部つむぎ、
+  発話後は自動で表情 `embarrassed`（`say --speaker N` / `say --face <name>` で変更可）。
+  `listen`（STT）は別途 STT extra が必要（未セットアップ）。
 - mDNS 自動検出が通らない環境では、デバイスに WebSocket URL を明示設定してください。
 
 ## ドキュメント
