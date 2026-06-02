@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -40,9 +41,13 @@ func cmdDaemon(args []string) error {
 	set, verbose := fs("daemon")
 	connectTimeout := set.Int("connect-timeout", 90, "seconds to wait for the device on startup")
 	pollMs := set.Int("touch-poll", 150, "touch poll interval in ms (0 disables touch reactions)")
+	home, _ := os.UserHomeDir()
+	reactions := set.String("reactions", filepath.Join(home, ".stackchan", "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
+	reactionsDir = *reactions
+	seedReactions(reactionsDir)
 
 	if conn, err := net.DialTimeout("tcp", ipcAddr, 200*time.Millisecond); err == nil {
 		_ = conn.Close()
@@ -61,7 +66,7 @@ func cmdDaemon(args []string) error {
 		} else {
 			fmt.Fprintln(os.Stderr, "daemon: device connected ✓")
 		}
-		fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch-poll %dms · forward with `stackchan-cli <cmd>` · Ctrl-C to stop\n", ipcAddr, *pollMs)
+		fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch-poll %dms · reactions %s · Ctrl-C to stop\n", ipcAddr, *pollMs, reactionsDir)
 
 		stop := make(chan struct{})
 		var stopOnce sync.Once
@@ -175,10 +180,47 @@ func touchWatch(c *mcp.Client, interval time.Duration, stop <-chan struct{}) {
 	}
 }
 
-// reactToGesture runs a little reaction. Output goes to the daemon log (stderr)
-// so it doesn't get tangled with forwarded-command output.
+// reactionsDir holds per-gesture reaction scripts (<gesture>.txt). Set by cmdDaemon.
+var reactionsDir string
+
+// defaultReactions seed the reaction-script files on first run so they can be
+// edited without rebuilding. They mirror the built-in fallback behavior.
+var defaultReactions = map[string]string{
+	"tap": `# Reaction for a quick tap. Any REPL commands work (avatar/mouth/led/say/sleep...).
+all-leds --r 80 --g 180 --b 255
+say --face happy "わっ、なあに？"
+clear-leds
+`,
+	"stroke": `# Reaction for a stroke / long touch.
+all-leds --r 255 --g 120 --b 160
+say --face embarrassed "えへへ、なでられるの好き。"
+clear-leds
+`,
+}
+
+func seedReactions(dir string) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	for gesture, body := range defaultReactions {
+		p := filepath.Join(dir, gesture+".txt")
+		if _, err := os.Stat(p); os.IsNotExist(err) {
+			_ = os.WriteFile(p, []byte(body), 0o644)
+		}
+	}
+}
+
+// reactToGesture runs the reaction for a gesture: the script file
+// reactionsDir/<gesture>.txt if present, else a built-in fallback. Output goes
+// to the daemon log (stderr) so it doesn't tangle with forwarded-command output.
 func reactToGesture(c *mcp.Client, gesture string) {
 	fmt.Fprintf(os.Stderr, "daemon: touch %q -> reacting\n", gesture)
+	if reactionsDir != "" {
+		if file := filepath.Join(reactionsDir, gesture+".txt"); fileExists(file) {
+			withOutput(os.Stderr, func() { _ = doSource([]string{file}, c) })
+			return
+		}
+	}
 	withOutput(os.Stderr, func() {
 		switch gesture {
 		case "stroke":
@@ -193,6 +235,11 @@ func reactToGesture(c *mcp.Client, gesture string) {
 			_, _ = runLine("avatar happy", c)
 		}
 	})
+}
+
+func fileExists(p string) bool {
+	info, err := os.Stat(p)
+	return err == nil && !info.IsDir()
 }
 
 // forwardToDaemon sends argv to a running daemon and copies the reply to stdout.

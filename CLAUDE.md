@@ -399,6 +399,11 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - **実機知見**: ①ヘッドタッチは **zone0/1/2 の特定スポット**に**手のひらで大きく覆う**と発動しやすい
   （指先のなで/位置ズレだと raw=0 のまま無反応＝センサ自体は正常）。②ファーム分類は stroke 偏重 →
   接触時間ベースの自前判定で tap/stroke を出し分け可能に。tap 上限は 1s が体感良。
+- 反応は**スクリプト化**: `~/.stackchan/reactions/<gesture>.txt`（初回 daemon 起動で雛形生成）。
+  あればその中身を `doSource`/`runLine` で実行（avatar/led/say/sleep 等）、無ければ組み込み既定。
+  **再ビルド不要**で発火時に都度読む。`--reactions <dir>` で場所変更。`reactToGesture`/`seedReactions`。
+- 運用注意: daemon の再起動時は **gateway 子プロセス(8765/8766) が完全に落ちてから**でないと
+  次の gateway が "closed stdout" で失敗する。ポート(8765/8766/8770)空きを確認してから起動。
 - 注意: daemon 稼働中は `repl` 非対応（自前 gateway 起動で競合）。one-shot 転送を使う。
 
 ## TTS（発話）セットアップlog（2026-06-02・成功）

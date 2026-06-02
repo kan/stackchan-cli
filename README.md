@@ -97,10 +97,11 @@ stackchan-cli avatar happy
 stackchan-cli say "やっほー"
 ```
 
-- **タッチ反応**：頭部センサ（zone0/1/2）に触れると tap/stroke を検知して反応。
-  既定は stroke→照れ顔＋ピンク LED＋「えへへ、なでられるの好き。」、tap→驚き＋青 LED＋「わっ、なあに？」。
-  `daemon --touch-poll 0` で無効、`--touch-poll <ms>` で間隔変更。反応内容は `daemon.go` の
-  `reactToGesture` を編集。
+- **タッチ反応**：頭部センサ（zone0/1/2）に手のひらで触れると、接触時間で tap/stroke を分類して反応
+  （〜1秒=tap / それ以上=stroke）。`daemon --touch-poll 0` で無効、`--touch-poll <ms>` で間隔変更。
+- **反応は編集可能なスクリプト**：daemon 初回起動時に `~/.stackchan/reactions/tap.txt` と `stroke.txt`
+  を雛形生成。中身は REPL コマンド（`avatar`/`mouth`/`led`/`say`/`sleep` など）を行で並べるだけ。
+  **再ビルド不要**で、ジェスチャ発火時にその場のファイル内容が実行される（`--reactions <dir>` で場所変更）。
 - daemon 稼働中は one-shot コマンドが自動で IPC 転送される（`repl` は未対応＝daemon 停止中に使う）。
 
 ### スクリプト / 演出
