@@ -354,6 +354,16 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 体感を上げるには **常駐 gateway（stage-2 REPL / stage-3 daemon+IPC）**が本筋。one-shot は「起動→90s待ち→実行」で遅い。
 - `wait [--timeout N]` コマンド = gateway を保持して `connected:true` を待つ（疎通確認・デバッグ用）。
 
+### stage-2 REPL（実装済み・2026-06-02）
+- `stackchan-cli repl`: gateway を**1回だけ起動して常駐**、初回だけ `connected` を待ち、
+  以降は対話プロンプト `stackchan> ` で各コマンドを**即時実行**（再接続待ち無し）。
+- 実装: 各 `cmdX(args, c *mcp.Client)` を永続クライアント対応に統一（`c!=nil` で reuse・device 待ちスキップ、
+  `c==nil` で従来の one-shot）。共通化に `withClientOrReuse` / `callAndPrint(..., outer *mcp.Client)`。
+  シェル風 `tokenize` でクォート対応（`say "..."`, `call <tool> --json '{...}'`）。FlagSet は ContinueOnError（REPL で os.Exit させない）。
+- 実機確認: REPL に status→avatar happy→all-leds→move-head→avatar idle を流し込み、
+  **デバイス接続を維持したまま全コマンド即応答**（90s 再接続待ちが消えた）。
+- 残: stage-3 daemon + ローカル IPC（バックグラウンド常駐で one-shot コマンドも高速化）。
+
 ### 起動・運用メモ
 - 実行: `STACKCHAN_TOKEN` 空 + `VISION_HOST=<PC-LAN-IP>` で `stackchan-cli <cmd>`。
 - gateway 子プロセスは新版で **`serve`（既定 `--transport stdio`）** 起動（CLI 実装済み）。

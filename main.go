@@ -1,14 +1,15 @@
 // Command stackchan-cli controls an M5 StackChan robot through the
-// stackchan-mcp gateway. It spawns the gateway as a child process and drives it
-// over stdio MCP (JSON-RPC 2.0): initialize -> tools/call.
+// stackchan-mcp gateway over stdio MCP (JSON-RPC 2.0): initialize -> tools/call.
 //
-// This is the stage-1 "one-shot" form: every command boots a fresh gateway,
-// runs one tool, and exits. Device-requiring tools (move-head, avatar, ...)
-// need a StackChan connected to the gateway's WebSocket; status/tools work
-// without a device.
+// Two modes:
+//   - one-shot: each command boots a fresh gateway, runs one tool, and exits.
+//     Device commands first wait for the StackChan to (re)connect.
+//   - repl: boot the gateway once and keep it (and the device connection)
+//     resident, so commands run instantly without per-command reconnects.
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -30,40 +31,52 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
-	var err error
 	switch cmd {
-	case "status":
-		err = cmdStatus(args)
-	case "tools":
-		err = cmdTools(args)
-	case "wait":
-		err = cmdWait(args)
-	case "move-head":
-		err = cmdMoveHead(args)
-	case "avatar":
-		err = cmdAvatar(args)
-	case "led":
-		err = cmdLED(args)
-	case "all-leds":
-		err = cmdAllLEDs(args)
-	case "say":
-		err = cmdSay(args)
-	case "photo":
-		err = cmdPhoto(args)
-	case "call":
-		err = cmdCall(args)
 	case "-h", "--help", "help":
 		usage()
 		return
-	default:
-		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
-		usage()
-		os.Exit(2)
+	case "repl":
+		if err := cmdRepl(args); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
-	if err != nil {
+	// one-shot: nil client => each handler spawns its own gateway.
+	if err := dispatch(cmd, args, nil); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// dispatch routes a command name to its handler. c is nil in one-shot mode
+// (handlers spawn a fresh gateway) or a live client in REPL mode (reused, so
+// the gateway and device connection persist between commands).
+func dispatch(cmd string, args []string, c *mcp.Client) error {
+	switch cmd {
+	case "status":
+		return cmdStatus(args, c)
+	case "tools":
+		return cmdTools(args, c)
+	case "wait":
+		return cmdWait(args, c)
+	case "move-head":
+		return cmdMoveHead(args, c)
+	case "avatar":
+		return cmdAvatar(args, c)
+	case "led":
+		return cmdLED(args, c)
+	case "all-leds":
+		return cmdAllLEDs(args, c)
+	case "say":
+		return cmdSay(args, c)
+	case "photo":
+		return cmdPhoto(args, c)
+	case "call":
+		return cmdCall(args, c)
+	default:
+		return fmt.Errorf("unknown command: %s (try 'help')", cmd)
 	}
 }
 
@@ -72,11 +85,12 @@ func usage() {
 
 Usage:
   stackchan-cli <command> [flags]
+  stackchan-cli repl                  Interactive session (gateway stays resident; fast)
 
 Commands:
   status                 Show gateway/device connection status (no device needed)
   tools                  List the tools the gateway exposes (no device needed)
-  wait [--timeout N]     Keep the gateway up and wait for the device to connect (mDNS)
+  wait [--timeout N]     Keep the gateway up and wait for the device to connect
   move-head --yaw N --pitch N
   avatar <face>          idle|happy|thinking|sad|surprised|embarrassed|off
   led --index N --r N --g N --b N
@@ -87,11 +101,14 @@ Commands:
 
 Environment:
   STACKCHAN_MCP_EXE   path to the gateway executable (default: PATH / ~/.local/bin)
-  STACKCHAN_TOKEN     bearer token shared with the firmware (required by the gateway)
+  STACKCHAN_TOKEN     bearer token shared with the firmware (empty = no auth)
   VISION_HOST         this host's LAN IP, required for 'photo'
 
-Global flags (place before the command's own flags):
-  --verbose           forward the gateway's stderr logs
+Per-command flags:
+  --verbose           forward the gateway's stderr logs (one-shot mode)
+
+In one-shot mode every command restarts the gateway, so device commands wait up
+to 90s for the StackChan to reconnect. Use 'repl' for snappy repeated control.
 `)
 }
 
@@ -119,6 +136,15 @@ func withClient(verbose bool, fn func(*mcp.Client) error) error {
 	return fn(c)
 }
 
+// withClientOrReuse runs fn against an existing client (REPL mode, c != nil) or
+// against a freshly spawned one-shot gateway (c == nil).
+func withClientOrReuse(verbose bool, c *mcp.Client, fn func(*mcp.Client) error) error {
+	if c != nil {
+		return fn(c)
+	}
+	return withClient(verbose, fn)
+}
+
 func gatewayPath() string {
 	if p := os.Getenv("STACKCHAN_MCP_EXE"); p != "" {
 		return p
@@ -138,13 +164,14 @@ func gatewayEnv() []string {
 	return env
 }
 
-// callAndPrint runs one tool and prints its text result. When waitDevice is
-// true it first blocks until the StackChan has (re)connected to the freshly
-// spawned gateway, since one-shot mode starts a new gateway each invocation and
-// the device needs a moment to reconnect to ws://<host>:8765/.
-func callAndPrint(verbose bool, waitDevice bool, tool string, args map[string]any) error {
-	return withClient(verbose, func(c *mcp.Client) error {
-		if waitDevice {
+// callAndPrint runs one tool and prints its text result. In one-shot mode
+// (outer == nil) it spawns a gateway and, when waitDevice is set, blocks until
+// the StackChan reconnects. In REPL mode (outer != nil) it reuses the resident
+// client and skips the wait, since the device stays connected between commands.
+func callAndPrint(verbose, waitDevice bool, tool string, args map[string]any, outer *mcp.Client) error {
+	oneShot := outer == nil
+	return withClientOrReuse(verbose, outer, func(c *mcp.Client) error {
+		if waitDevice && oneShot {
 			fmt.Fprintln(os.Stderr, "waiting for device to connect...")
 			if err := waitConnected(c, 90*time.Second); err != nil {
 				return err
@@ -170,7 +197,7 @@ func waitConnected(c *mcp.Client, timeout time.Duration) error {
 		if err != nil {
 			return err
 		}
-		if strings.Contains(strings.ReplaceAll(res.Text(), " ", ""), "\"connected\":true") {
+		if isConnected(res.Text()) {
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -180,25 +207,34 @@ func waitConnected(c *mcp.Client, timeout time.Duration) error {
 	}
 }
 
-// fs builds a FlagSet with a shared --verbose flag and returns a pointer to it.
+func isConnected(statusText string) bool {
+	return strings.Contains(strings.ReplaceAll(statusText, " ", ""), "\"connected\":true")
+}
+
+// fs builds a FlagSet with a shared --verbose flag. ContinueOnError keeps a bad
+// flag from calling os.Exit (which would kill the REPL).
 func fs(name string) (*flag.FlagSet, *bool) {
-	set := flag.NewFlagSet(name, flag.ExitOnError)
+	set := flag.NewFlagSet(name, flag.ContinueOnError)
 	verbose := set.Bool("verbose", false, "forward gateway stderr logs")
 	return set, verbose
 }
 
 // ---- commands --------------------------------------------------------------
 
-func cmdStatus(args []string) error {
+func cmdStatus(args []string, c *mcp.Client) error {
 	set, verbose := fs("status")
-	_ = set.Parse(args)
-	return callAndPrint(*verbose, false, "get_status", map[string]any{})
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, false, "get_status", map[string]any{}, c)
 }
 
-func cmdTools(args []string) error {
+func cmdTools(args []string, c *mcp.Client) error {
 	set, verbose := fs("tools")
-	_ = set.Parse(args)
-	return withClient(*verbose, func(c *mcp.Client) error {
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
 		tools, err := c.ListTools()
 		if err != nil {
 			return err
@@ -215,11 +251,13 @@ func cmdTools(args []string) error {
 	})
 }
 
-func cmdWait(args []string) error {
+func cmdWait(args []string, c *mcp.Client) error {
 	set, verbose := fs("wait")
 	timeout := set.Int("timeout", 60, "seconds to wait for the device to connect")
-	_ = set.Parse(args)
-	return withClient(*verbose, func(c *mcp.Client) error {
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
 		deadline := time.Now().Add(time.Duration(*timeout) * time.Second)
 		for {
 			res, err := c.CallTool("get_status", map[string]any{})
@@ -228,7 +266,7 @@ func cmdWait(args []string) error {
 			}
 			txt := strings.Join(strings.Fields(res.Text()), " ")
 			fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), txt)
-			if strings.Contains(strings.ReplaceAll(txt, " ", ""), "\"connected\":true") {
+			if isConnected(txt) {
 				fmt.Println("device connected ✓")
 				return nil
 			}
@@ -240,62 +278,76 @@ func cmdWait(args []string) error {
 	})
 }
 
-func cmdMoveHead(args []string) error {
+func cmdMoveHead(args []string, c *mcp.Client) error {
 	set, verbose := fs("move-head")
 	yaw := set.Int("yaw", 0, "horizontal angle, -90..90")
 	pitch := set.Int("pitch", 45, "vertical angle, 5..85")
-	_ = set.Parse(args)
-	return callAndPrint(*verbose, true, "move_head", map[string]any{"yaw": *yaw, "pitch": *pitch})
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "move_head", map[string]any{"yaw": *yaw, "pitch": *pitch}, c)
 }
 
-func cmdAvatar(args []string) error {
+func cmdAvatar(args []string, c *mcp.Client) error {
 	set, verbose := fs("avatar")
-	_ = set.Parse(args)
+	if err := set.Parse(args); err != nil {
+		return err
+	}
 	if set.NArg() < 1 {
 		return fmt.Errorf("avatar requires a face (idle|happy|thinking|sad|surprised|embarrassed|off)")
 	}
-	return callAndPrint(*verbose, true, "set_avatar", map[string]any{"face": set.Arg(0)})
+	return callAndPrint(*verbose, true, "set_avatar", map[string]any{"face": set.Arg(0)}, c)
 }
 
-func cmdLED(args []string) error {
+func cmdLED(args []string, c *mcp.Client) error {
 	set, verbose := fs("led")
 	index := set.Int("index", 0, "LED index 0..11")
 	r := set.Int("r", 0, "red 0..255")
 	g := set.Int("g", 0, "green 0..255")
 	b := set.Int("b", 0, "blue 0..255")
-	_ = set.Parse(args)
-	return callAndPrint(*verbose, true, "set_led", map[string]any{"index": *index, "r": *r, "g": *g, "b": *b})
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "set_led", map[string]any{"index": *index, "r": *r, "g": *g, "b": *b}, c)
 }
 
-func cmdAllLEDs(args []string) error {
+func cmdAllLEDs(args []string, c *mcp.Client) error {
 	set, verbose := fs("all-leds")
 	r := set.Int("r", 0, "red 0..255")
 	g := set.Int("g", 0, "green 0..255")
 	b := set.Int("b", 0, "blue 0..255")
-	_ = set.Parse(args)
-	return callAndPrint(*verbose, true, "set_all_leds", map[string]any{"r": *r, "g": *g, "b": *b})
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "set_all_leds", map[string]any{"r": *r, "g": *g, "b": *b}, c)
 }
 
-func cmdSay(args []string) error {
+func cmdSay(args []string, c *mcp.Client) error {
 	set, verbose := fs("say")
-	_ = set.Parse(args)
+	if err := set.Parse(args); err != nil {
+		return err
+	}
 	if set.NArg() < 1 {
 		return fmt.Errorf("say requires text")
 	}
-	return callAndPrint(*verbose, true, "say", map[string]any{"text": set.Arg(0)})
+	return callAndPrint(*verbose, true, "say", map[string]any{"text": strings.Join(set.Args(), " ")}, c)
 }
 
-func cmdPhoto(args []string) error {
+func cmdPhoto(args []string, c *mcp.Client) error {
 	set, verbose := fs("photo")
 	question := set.String("question", "What do you see?", "question to ask about the photo")
-	_ = set.Parse(args)
-	return callAndPrint(*verbose, true, "take_photo", map[string]any{"question": *question})
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "take_photo", map[string]any{"question": *question}, c)
 }
 
-func cmdCall(args []string) error {
+func cmdCall(args []string, c *mcp.Client) error {
 	set, verbose := fs("call")
 	jsonArgs := set.String("json", "{}", "tool arguments as a JSON object")
-	_ = set.Parse(args)
+	if err := set.Parse(args); err != nil {
+		return err
+	}
 	if set.NArg() < 1 {
 		return fmt.Errorf("call requires a tool name")
 	}
@@ -303,5 +355,105 @@ func cmdCall(args []string) error {
 	if err := json.Unmarshal([]byte(*jsonArgs), &toolArgs); err != nil {
 		return fmt.Errorf("--json: %w", err)
 	}
-	return callAndPrint(*verbose, true, set.Arg(0), toolArgs)
+	return callAndPrint(*verbose, true, set.Arg(0), toolArgs, c)
+}
+
+// ---- REPL ------------------------------------------------------------------
+
+func cmdRepl(args []string) error {
+	set, verbose := fs("repl")
+	connectTimeout := set.Int("connect-timeout", 90, "seconds to wait for the initial device connection")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return withClient(*verbose, func(c *mcp.Client) error {
+		fmt.Fprintln(os.Stderr, "gateway up; waiting for device to connect...")
+		if err := waitConnected(c, time.Duration(*connectTimeout)*time.Second); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v — commands may fail until the device connects\n", err)
+		} else {
+			fmt.Println("device connected ✓")
+		}
+		fmt.Println("type 'help' for commands, 'quit' to exit")
+
+		in := bufio.NewScanner(os.Stdin)
+		fmt.Print("stackchan> ")
+		for in.Scan() {
+			line := strings.TrimSpace(in.Text())
+			if line == "" {
+				fmt.Print("stackchan> ")
+				continue
+			}
+			toks := tokenize(line)
+			name, rest := toks[0], toks[1:]
+			switch name {
+			case "quit", "exit", "q":
+				return nil
+			case "help", "?":
+				replHelp()
+			default:
+				if err := dispatch(name, rest, c); err != nil {
+					fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				}
+			}
+			fmt.Print("stackchan> ")
+		}
+		fmt.Println()
+		return in.Err()
+	})
+}
+
+func replHelp() {
+	fmt.Println(`commands (device stays connected; runs instantly):
+  status                         connection status
+  tools                          list gateway tools
+  avatar <face>                  idle|happy|thinking|sad|surprised|embarrassed|off
+  move-head --yaw N --pitch N    yaw -90..90, pitch 5..85
+  led --index N --r N --g N --b N
+  all-leds --r N --g N --b N
+  say <text>                     (needs gateway TTS extra)
+  photo --question "..."
+  call <tool> --json '{...}'     raw tool call
+  help | quit`)
+}
+
+// tokenize splits a REPL line into arguments, honoring single and double quotes
+// so that `say "hello world"` and `call t --json '{"a":1}'` work as expected.
+func tokenize(line string) []string {
+	var toks []string
+	var cur strings.Builder
+	inSingle, inDouble, has := false, false, false
+	flush := func() {
+		if has {
+			toks = append(toks, cur.String())
+			cur.Reset()
+			has = false
+		}
+	}
+	for _, r := range line {
+		switch {
+		case inSingle:
+			if r == '\'' {
+				inSingle = false
+			} else {
+				cur.WriteRune(r)
+			}
+		case inDouble:
+			if r == '"' {
+				inDouble = false
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'':
+			inSingle, has = true, true
+		case r == '"':
+			inDouble, has = true, true
+		case r == ' ' || r == '\t':
+			flush()
+		default:
+			cur.WriteRune(r)
+			has = true
+		}
+	}
+	flush()
+	return toks
 }

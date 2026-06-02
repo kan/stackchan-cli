@@ -53,10 +53,29 @@ export VISION_HOST=<PC-LAN-IP> # take_photo 用
 
 デバイス系コマンドは、gateway 起動後にデバイスが再接続するまで待ってから実行します。
 
+### REPL（連続操作向け・推奨）
+
+`repl` は gateway を**1回だけ起動して常駐**させ、デバイスを繋ぎっぱなしにするので、
+コマンド毎の再接続待ちが無く即時実行できます。
+
+```
+./stackchan-cli repl
+# gateway up; waiting for device to connect...
+# device connected ✓
+# stackchan> avatar happy
+# stackchan> move-head --yaw 30 --pitch 40
+# stackchan> all-leds --r 0 --g 255 --b 0
+# stackchan> say "こんにちは"
+# stackchan> quit
+```
+
+`"..."` / `'...'` のクォートが使えるので `say "hello world"` や
+`call <tool> --json '{"k":"v"}'` もそのまま入力できます。
+
 ## 既知の制限
 
-- **one-shot 方式**：コマンド毎に gateway を起動/終了するため、デバイス再接続待ちで遅い。
-  常駐（REPL / daemon）化は今後の課題。
+- **one-shot 方式**：コマンド毎に gateway を起動/終了するため、デバイス再接続待ち（最大90s）で遅い。
+  連続操作には **`repl`（gateway 常駐）** を使うと即時実行。daemon+IPC 化（バックグラウンド常駐）は今後の課題。
 - `say` / `listen`（TTS/STT）は gateway 側に optional extra を入れるまで使えません。
 - mDNS 自動検出が通らない環境では、デバイスに WebSocket URL を明示設定してください。
 
