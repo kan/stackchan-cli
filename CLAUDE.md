@@ -364,6 +364,17 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   **デバイス接続を維持したまま全コマンド即応答**（90s 再接続待ちが消えた）。
 - 残: stage-3 daemon + ローカル IPC（バックグラウンド常駐で one-shot コマンドも高速化）。
 
+### avatar が画面に出ない（プリビルド firmware の仕様・実機確認）
+- 症状: `avatar <face>`（`off` 含む）は `ok:true` を返すが**画面に変化なし**。move-head / LED は正常。
+- 原因: 公開プリビルド `merged-binary` の `firmware/main/boards/stackchan/avatar_images.cc` が
+  **真っ黒の RGB565 プレースホルダ**（顔画像は権利上同梱不可）。よって set_avatar は効くが描画が空。
+  画面のニコニコ顔は **xiaozhi 標準 emoji**（set_avatar 管轄外の別レイヤー）。
+- 見える顔にするには **ソースからビルドが必要**:
+  1. PNG を `~/.stackchan/avatar/` に置く → 2. `cd firmware && python scripts/avatar_convert/convert_avatars.py`
+  （`avatar_images.local.cc/.h` を生成、git 無視。存在すれば placeholder の代わりに使われる）
+  3. ESP-IDF/Docker でビルド（`espressif/idf:v5.5.2 ... release.py stackchan`）→ 4. 再フラッシュ（`--before default-reset`）。
+- ⇒ CLI 制御は全系統 OK。avatar 画像だけはプリビルドの制約で、ソースビルド案件。
+
 ### 起動・運用メモ
 - 実行: `STACKCHAN_TOKEN` 空 + `VISION_HOST=<PC-LAN-IP>` で `stackchan-cli <cmd>`。
 - gateway 子プロセスは新版で **`serve`（既定 `--transport stdio`）** 起動（CLI 実装済み）。
