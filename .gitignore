@@ -1,0 +1,21 @@
+# Go build artifacts
+/stackchan-cli
+/stackchan-cli.exe
+*.exe
+*.test
+
+# Python smoke-test caches
+__pycache__/
+*.pyc
+
+# local env / secrets
+.env
+
+# firmware binaries & flashing logs:
+#  - merged-binary*.bin is large; download from upstream releases instead
+#  - backup-* is a dump of the stock (official) firmware — do NOT publish (3rd-party copyright)
+#  - *.log are esptool/gateway logs containing device MAC / local paths
+/firmware/
+
+# local environment notes (device MAC, LAN/Tailscale IPs, username) — not for publishing
+*.local.md

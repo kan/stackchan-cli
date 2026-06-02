@@ -1,0 +1,466 @@
+{
+  "tools": [
+    {
+      "name": "get_status",
+      "description": "Get the gateway's connection status: whether ESP32 is connected, device info, and list of available device tools.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "get_device_info",
+      "description": "Get real-time device information from ESP32: battery level, speaker volume, screen brightness, network status, etc.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "take_photo",
+      "description": "Take a photo with the robot's camera and ask a question about it. The device captures an image and returns an AI-generated description.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string",
+            "description": "Question to ask about the photo (e.g. 'What do you see?')"
+          }
+        },
+        "required": [
+          "question"
+        ]
+      }
+    },
+    {
+      "name": "set_volume",
+      "description": "Set the speaker volume (0-100).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "volume": {
+            "type": "integer",
+            "description": "Volume level (0-100)"
+          }
+        },
+        "required": [
+          "volume"
+        ]
+      }
+    },
+    {
+      "name": "set_brightness",
+      "description": "Set the screen brightness (0-100).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "brightness": {
+            "type": "integer",
+            "description": "Brightness level (0-100)"
+          }
+        },
+        "required": [
+          "brightness"
+        ]
+      }
+    },
+    {
+      "name": "move_head",
+      "description": "Move the robot's head to safe, recommended angles. yaw: horizontal (-90 to 90), pitch: vertical (5 to 85, the M5Stack-recommended operating range). Out-of-range requests are rejected at this MCP layer; for advanced callers that need the firmware hard clamp (pitch 0..88), use the firmware-side `set_head_angles` device tool, which exposes a permissive schema and the authoritative two-tier guard described in the README.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "yaw": {
+            "type": "integer",
+            "description": "Horizontal angle in degrees (-90 to 90)",
+            "minimum": -90,
+            "maximum": 90
+          },
+          "pitch": {
+            "type": "integer",
+            "description": "Vertical angle in degrees (5 to 85, M5Stack-recommended operating range). For the wider firmware hard clamp (0..88), use the `set_head_angles` device tool instead.",
+            "minimum": 5,
+            "maximum": 85
+          }
+        },
+        "required": [
+          "yaw",
+          "pitch"
+        ]
+      }
+    },
+    {
+      "name": "get_head_angles",
+      "description": "Get the robot's current head angles: yaw and pitch in degrees.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "gpio_test",
+      "description": "Test GPIO6 pin by toggling HIGH/LOW 5 times. Check if servo reacts.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "uart_diag",
+      "description": "Send raw servo bytes via UART and report write result.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "check_vm_en",
+      "description": "Diagnostic: read PY32 REG_GPIO_O_L and report whether VM EN (pin 0 = servo power) is currently HIGH. Returns {io_expander_present, i2c_read_ok, raw, vm_en_high}.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "set_avatar",
+      "description": "Switch the avatar face shown on the LCD. Choose one of the supported faces; this is the robot's actual visible expression, not just a label. Pass 'off' to hide the avatar and disable blink, exposing the underlying xiaozhi-esp32 screens (WiFi config UI, OTA, settings); any other face brings the avatar back and restores blink.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "face": {
+            "type": "string",
+            "enum": [
+              "idle",
+              "happy",
+              "thinking",
+              "sad",
+              "surprised",
+              "embarrassed",
+              "off"
+            ],
+            "description": "One of: idle, happy, thinking, sad, surprised, embarrassed, off."
+          }
+        },
+        "required": [
+          "face"
+        ]
+      }
+    },
+    {
+      "name": "set_mouth",
+      "description": "Set the avatar mouth shape for lip-sync. The shape is held until the next set_avatar / set_mouth call, or until an autonomous blink restores the resting face. Calling this while a set_mouth_sequence is in flight interrupts the sequence.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "mouth": {
+            "type": "string",
+            "enum": [
+              "closed",
+              "half",
+              "open",
+              "e",
+              "u"
+            ],
+            "description": "One of: closed, half, open, e, u."
+          }
+        },
+        "required": [
+          "mouth"
+        ]
+      }
+    },
+    {
+      "name": "set_mouth_sequence",
+      "description": "Queue a lip-sync sequence and play it on the device. Each step holds 'shape' for 'duration_ms' before advancing. The firmware walks the queue locally so there is no per-step network RTT (use this instead of issuing many set_mouth calls back-to-back from a TTS loop). Returns immediately with the queued step count and estimated total duration. Calling set_mouth, set_avatar, or this tool again interrupts the in-flight sequence and replaces it. Autonomous blink is paused while a sequence is playing and resumed when it ends. The final shape is held until the next set_mouth / set_avatar call, or until an autonomous blink restores the resting face — this is the same Phase 2 trade-off that applies to set_mouth, since the blink animation ends by repainting the full face. If the final shape must persist visually, disable blink with set_blink(false) before the sequence (or append a closed step if you just want the mouth to close at the end).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 256,
+            "items": {
+              "type": "object",
+              "properties": {
+                "shape": {
+                  "type": "string",
+                  "enum": [
+                    "closed",
+                    "half",
+                    "open",
+                    "e",
+                    "u"
+                  ],
+                  "description": "Mouth shape for this step. One of: closed, half, open, e, u."
+                },
+                "duration_ms": {
+                  "type": "integer",
+                  "minimum": 10,
+                  "maximum": 10000,
+                  "description": "How long to hold this shape before advancing, in ms (10..10000)."
+                }
+              },
+              "required": [
+                "shape",
+                "duration_ms"
+              ]
+            },
+            "description": "Ordered list of mouth shapes with hold durations (1..256 steps)."
+          }
+        },
+        "required": [
+          "steps"
+        ]
+      }
+    },
+    {
+      "name": "set_blink",
+      "description": "Enable or disable autonomous eye blinking. When enabled, the avatar blinks every 3-6 seconds at random.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "True to start blinking, false to stop."
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      }
+    },
+    {
+      "name": "set_servo_torque",
+      "description": "Enable or disable SCS0009 servo torque on the yaw / pitch axes independently. Disabling torque stops motor current on that axis; the head holds via static friction (no motion is commanded). On disable, the firmware also cancels any in-flight MotionDriver interpolation and marks the axis position unknown so a subsequent same-target set_head_angles is re-dispatched rather than no-op-optimized. Re-enabling torque does NOT trigger a move; the next set_head_angles or wobble call will. Diagnostic / power-management primitive used to observe physical head behavior under torque-off (Issue #163; auto release on idle is Issue #152 Phase 4).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "yaw_enabled": {
+            "type": "boolean",
+            "description": "True to enable yaw axis torque, false to disable."
+          },
+          "pitch_enabled": {
+            "type": "boolean",
+            "description": "True to enable pitch axis torque, false to disable."
+          }
+        },
+        "required": [
+          "yaw_enabled",
+          "pitch_enabled"
+        ]
+      }
+    },
+    {
+      "name": "set_auto_torque_release",
+      "description": "Enable or disable firmware-side automatic SCS0009 torque release after motion idle timeout. timeout_ms is clamped by the firmware to 500..600000 ms. Disabling this setting does not re-enable torque if it is already released; the next set_head_angles, wobble, or explicit set_servo_torque(true, true) call re-engages torque.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "True to enable idle auto-release, false to disable it."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "Idle timeout in milliseconds. Values outside 500..600000 are clamped by the firmware handler."
+          }
+        },
+        "required": [
+          "enabled",
+          "timeout_ms"
+        ]
+      }
+    },
+    {
+      "name": "get_touch_state",
+      "description": "Read the head-touch (Si12T) sensor state and the most recent gesture event (tap/stroke/idle). Returns per-zone booleans, the raw output byte, and how long ago the last event fired.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "set_led",
+      "description": "Set a single RGB LED on the StackChan base. There are 12 LEDs arranged in two rows of 6 (index 0..11). Updates immediately.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "index": {
+            "type": "integer",
+            "description": "LED index (0..11)",
+            "minimum": 0,
+            "maximum": 11
+          },
+          "r": {
+            "type": "integer",
+            "description": "Red 0..255",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "g": {
+            "type": "integer",
+            "description": "Green 0..255",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "b": {
+            "type": "integer",
+            "description": "Blue 0..255",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "required": [
+          "index",
+          "r",
+          "g",
+          "b"
+        ]
+      }
+    },
+    {
+      "name": "set_all_leds",
+      "description": "Set all 12 RGB LEDs on the StackChan base to the same color. Updates immediately.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "r": {
+            "type": "integer",
+            "description": "Red 0..255",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "g": {
+            "type": "integer",
+            "description": "Green 0..255",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "b": {
+            "type": "integer",
+            "description": "Blue 0..255",
+            "minimum": 0,
+            "maximum": 255
+          }
+        },
+        "required": [
+          "r",
+          "g",
+          "b"
+        ]
+      }
+    },
+    {
+      "name": "set_leds",
+      "description": "Set multiple RGB LEDs in one shot. 'colors' is an array of [r,g,b] triples starting at index 0 (e.g. [[255,0,0],[0,255,0]]). Up to 12 entries; extras are ignored, missing entries keep their previous color. Use this for animations / patterns to avoid 12x I2C round-trips.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "colors": {
+            "type": "array",
+            "description": "Array of [r,g,b] triples, each 0..255",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 255
+              },
+              "minItems": 3,
+              "maxItems": 3
+            },
+            "minItems": 1,
+            "maxItems": 12
+          }
+        },
+        "required": [
+          "colors"
+        ]
+      }
+    },
+    {
+      "name": "clear_leds",
+      "description": "Turn off all 12 RGB LEDs on the StackChan base.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "say",
+      "description": "Speak the given text on the device speaker via gateway-side TTS (Phase 4, Issue #70). The gateway synthesises audio, encodes it to Opus, and pushes frames over the existing WebSocket — the device firmware does not change. Engine is selectable via 'voice' (default 'voicevox'). NOTE: this build ships the framework only; concrete engines (VOICEVOX, Irodori) land in follow-up PRs and require the matching optional extra (e.g. 'pip install stackchan-mcp[tts-voicevox]'). Calling this tool before an engine is registered returns a clear error.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to speak. Must be non-empty."
+          },
+          "voice": {
+            "type": "string",
+            "description": "Engine identifier (e.g. 'voicevox', 'irodori'). Default 'voicevox'.",
+            "default": "voicevox"
+          },
+          "speaker_id": {
+            "type": "integer",
+            "description": "Engine-specific speaker identifier (e.g. a VOICEVOX speaker ID)."
+          },
+          "reference_audio": {
+            "type": "string",
+            "description": "Path to a reference audio file used by voice-cloning engines (e.g. Irodori). Ignored by engines that do not support it."
+          }
+        },
+        "required": [
+          "text"
+        ]
+      }
+    },
+    {
+      "name": "listen",
+      "description": "Capture a short utterance from the device microphone and transcribe it via a gateway-side STT engine (Phase 4, Issue #91). The gateway sends a 'listen' notification over the existing WebSocket to put the device firmware into listening mode, buffers the Opus frames the device streams up during the capture window, then decodes and transcribes them once the window closes. Requires a minimal firmware change to handle the inbound 'listen' wire type (paired with this gateway release). Engine is selectable via 'engine' (default 'faster-whisper', local). Optional 'motion' feedback can switch the avatar to 'thinking' during capture ('face-only') or tilt the head up while preserving yaw ('look-up'). Install the relevant extra ('pip install stackchan-mcp[stt-faster-whisper]' or 'stt-openai'); calling this tool before an engine is registered returns a clear error.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "duration_ms": {
+            "type": "integer",
+            "description": "Capture window in milliseconds. Clamped to [100, 30000].",
+            "default": 5000,
+            "minimum": 100,
+            "maximum": 30000
+          },
+          "engine": {
+            "type": "string",
+            "description": "Engine identifier (e.g. 'faster-whisper', 'openai-whisper'). Default 'faster-whisper'.",
+            "default": "faster-whisper"
+          },
+          "language": {
+            "type": "string",
+            "description": "ISO 639-1 language code (e.g. 'ja'). Pass an empty string or omit for autodetect.",
+            "default": "ja"
+          },
+          "model": {
+            "type": "string",
+            "description": "Engine-specific model identifier (e.g. 'base' / 'small' / 'medium' for faster-whisper, 'whisper-1' for OpenAI). Engines fall back to their default when omitted."
+          },
+          "motion": {
+            "type": "string",
+            "enum": [
+              "none",
+              "face-only",
+              "look-up"
+            ],
+            "description": "Optional visible feedback during capture. 'none' preserves the previous behaviour. 'face-only' shows the thinking avatar during capture and restores idle at the end. 'look-up' preserves yaw, tilts pitch to look_up_pitch, and holds the pose on success.",
+            "default": "none"
+          },
+          "look_up_pitch": {
+            "type": "number",
+            "description": "Pitch angle for motion='look-up'. Must be between 5 and 85 degrees.",
+            "default": 50.0,
+            "minimum": 5,
+            "maximum": 85
+          }
+        }
+      }
+    }
+  ]
+}
