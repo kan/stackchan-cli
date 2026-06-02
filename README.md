@@ -48,6 +48,7 @@ export VISION_HOST=<PC-LAN-IP> # take_photo 用
 ./stackchan-cli move-head --yaw 30 --pitch 40
 ./stackchan-cli all-leds --r 0 --g 0 --b 255
 ./stackchan-cli led --index 0 --r 255 --g 0 --b 0
+./stackchan-cli photo --question "何が見える？" --open  # 撮影→ ~/.stackchan/captures に保存し既定ビューアで表示（要 VISION_HOST）
 ./stackchan-cli call <tool> --json '{"...":"..."}'   # 任意ツールを生 JSON で
 ```
 

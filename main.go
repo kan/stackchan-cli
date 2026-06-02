@@ -96,7 +96,7 @@ Commands:
   led --index N --r N --g N --b N
   all-leds --r N --g N --b N
   say <text>
-  photo --question "..."
+  photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
 
 Environment:
@@ -336,10 +336,80 @@ func cmdSay(args []string, c *mcp.Client) error {
 func cmdPhoto(args []string, c *mcp.Client) error {
 	set, verbose := fs("photo")
 	question := set.String("question", "What do you see?", "question to ask about the photo")
+	open := set.Bool("open", false, "open the saved image in the default viewer")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
-	return callAndPrint(*verbose, true, "take_photo", map[string]any{"question": *question}, c)
+	oneShot := c == nil
+	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
+		if oneShot {
+			fmt.Fprintln(os.Stderr, "waiting for device to connect...")
+			if err := waitConnected(c, 90*time.Second); err != nil {
+				return err
+			}
+		}
+		res, err := c.CallTool("take_photo", map[string]any{"question": *question})
+		if err != nil {
+			return err
+		}
+		fmt.Println(res.Text())
+		if res.IsError {
+			return fmt.Errorf("take_photo reported an error")
+		}
+		path := savedImagePath(res.Text())
+		if path == "" {
+			fmt.Fprintf(os.Stderr, "(image not located; check %s)\n", capturesDir())
+			return nil
+		}
+		fmt.Printf("photo saved: %s\n", path)
+		if *open {
+			openInViewer(path)
+		}
+		return nil
+	})
+}
+
+func capturesDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".stackchan", "captures")
+}
+
+// savedImagePath returns the capture file path: prefer image_path from the tool
+// result JSON, else fall back to the newest *.jpg in the captures dir.
+func savedImagePath(resultText string) string {
+	var r struct {
+		ImagePath string `json:"image_path"`
+	}
+	if json.Unmarshal([]byte(resultText), &r) == nil && r.ImagePath != "" {
+		return r.ImagePath
+	}
+	entries, err := os.ReadDir(capturesDir())
+	if err != nil {
+		return ""
+	}
+	var newest string
+	var newestMod int64
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".jpg") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if m := info.ModTime().UnixNano(); m > newestMod {
+			newestMod, newest = m, filepath.Join(capturesDir(), e.Name())
+		}
+	}
+	return newest
+}
+
+// openInViewer opens a file with the OS default handler (Windows shell).
+func openInViewer(path string) {
+	cmd := exec.Command("cmd", "/c", "start", "", path)
+	if err := cmd.Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "could not open %s: %v\n", path, err)
+	}
 }
 
 func cmdCall(args []string, c *mcp.Client) error {
@@ -411,7 +481,7 @@ func replHelp() {
   led --index N --r N --g N --b N
   all-leds --r N --g N --b N
   say <text>                     (needs gateway TTS extra)
-  photo --question "..."
+  photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
   help | quit`)
 }
