@@ -45,9 +45,14 @@ export VISION_HOST=<PC-LAN-IP> # take_photo 用（未設定なら CLI が LAN IP
 ./stackchan-cli tools                        # 公開ツール一覧（デバイス不要）
 ./stackchan-cli wait                         # デバイス接続を待つ（疎通確認）
 ./stackchan-cli avatar happy                 # 表情変更 idle|happy|thinking|sad|surprised|embarrassed|off
+./stackchan-cli mouth open                   # 口形 closed|half|open|e|u
+./stackchan-cli blink off                    # まばたき on|off
 ./stackchan-cli move-head --yaw 30 --pitch 40
 ./stackchan-cli all-leds --r 0 --g 0 --b 255
 ./stackchan-cli led --index 0 --r 255 --g 0 --b 0
+./stackchan-cli clear-leds                   # 全消灯
+./stackchan-cli volume 60                    # スピーカ音量 0-100
+./stackchan-cli brightness 80                # 画面輝度 0-100
 ./stackchan-cli photo --question "何が見える？" --open  # 撮影→ ~/.stackchan/captures に保存し既定ビューアで表示（VISION_HOST は未設定なら自動検出）
 ./stackchan-cli call <tool> --json '{"...":"..."}'   # 任意ツールを生 JSON で
 ```

@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,10 +67,20 @@ func dispatch(cmd string, args []string, c *mcp.Client) error {
 		return cmdMoveHead(args, c)
 	case "avatar":
 		return cmdAvatar(args, c)
+	case "mouth":
+		return cmdMouth(args, c)
+	case "blink":
+		return cmdBlink(args, c)
 	case "led":
 		return cmdLED(args, c)
 	case "all-leds":
 		return cmdAllLEDs(args, c)
+	case "clear-leds":
+		return cmdClearLEDs(args, c)
+	case "volume":
+		return cmdVolume(args, c)
+	case "brightness":
+		return cmdBrightness(args, c)
 	case "say":
 		return cmdSay(args, c)
 	case "photo":
@@ -94,8 +105,13 @@ Commands:
   wait [--timeout N]     Keep the gateway up and wait for the device to connect
   move-head --yaw N --pitch N
   avatar <face>          idle|happy|thinking|sad|surprised|embarrassed|off
+  mouth <shape>          closed|half|open|e|u
+  blink <on|off>
   led --index N --r N --g N --b N
   all-leds --r N --g N --b N
+  clear-leds
+  volume <0-100>
+  brightness <0-100>
   say <text>
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
@@ -325,6 +341,90 @@ func cmdAvatar(args []string, c *mcp.Client) error {
 	return callAndPrint(*verbose, true, "set_avatar", map[string]any{"face": set.Arg(0)}, c)
 }
 
+func cmdMouth(args []string, c *mcp.Client) error {
+	set, verbose := fs("mouth")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() < 1 {
+		return fmt.Errorf("mouth requires a shape (closed|half|open|e|u)")
+	}
+	return callAndPrint(*verbose, true, "set_mouth", map[string]any{"mouth": set.Arg(0)}, c)
+}
+
+func cmdBlink(args []string, c *mcp.Client) error {
+	set, verbose := fs("blink")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() < 1 {
+		return fmt.Errorf("blink requires on|off")
+	}
+	enabled, err := parseOnOff(set.Arg(0))
+	if err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "set_blink", map[string]any{"enabled": enabled}, c)
+}
+
+func cmdVolume(args []string, c *mcp.Client) error {
+	set, verbose := fs("volume")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	n, err := intArg(set, "volume", 0, 100)
+	if err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "set_volume", map[string]any{"volume": n}, c)
+}
+
+func cmdBrightness(args []string, c *mcp.Client) error {
+	set, verbose := fs("brightness")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	n, err := intArg(set, "brightness", 0, 100)
+	if err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "set_brightness", map[string]any{"brightness": n}, c)
+}
+
+func cmdClearLEDs(args []string, c *mcp.Client) error {
+	set, verbose := fs("clear-leds")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	return callAndPrint(*verbose, true, "clear_leds", map[string]any{}, c)
+}
+
+// parseOnOff accepts on/off/true/false/1/0/yes/no.
+func parseOnOff(s string) (bool, error) {
+	switch strings.ToLower(s) {
+	case "on", "true", "1", "yes":
+		return true, nil
+	case "off", "false", "0", "no":
+		return false, nil
+	}
+	return false, fmt.Errorf("expected on|off, got %q", s)
+}
+
+// intArg reads the first positional as an int and range-checks it.
+func intArg(set *flag.FlagSet, name string, lo, hi int) (int, error) {
+	if set.NArg() < 1 {
+		return 0, fmt.Errorf("%s requires a number (%d..%d)", name, lo, hi)
+	}
+	n, err := strconv.Atoi(set.Arg(0))
+	if err != nil {
+		return 0, fmt.Errorf("%s: %q is not a number", name, set.Arg(0))
+	}
+	if n < lo || n > hi {
+		return 0, fmt.Errorf("%s must be %d..%d", name, lo, hi)
+	}
+	return n, nil
+}
+
 func cmdLED(args []string, c *mcp.Client) error {
 	set, verbose := fs("led")
 	index := set.Int("index", 0, "LED index 0..11")
@@ -541,9 +641,14 @@ func buildCompleter(c *mcp.Client) *readline.PrefixCompleter {
 		readline.PcItem("tools"),
 		readline.PcItem("wait"),
 		readline.PcItem("avatar", faces...),
+		readline.PcItem("mouth", pcItems("closed", "half", "open", "e", "u")...),
+		readline.PcItem("blink", readline.PcItem("on"), readline.PcItem("off")),
 		readline.PcItem("move-head", readline.PcItem("--yaw"), readline.PcItem("--pitch")),
 		readline.PcItem("led", readline.PcItem("--index"), readline.PcItem("--r"), readline.PcItem("--g"), readline.PcItem("--b")),
 		readline.PcItem("all-leds", readline.PcItem("--r"), readline.PcItem("--g"), readline.PcItem("--b")),
+		readline.PcItem("clear-leds"),
+		readline.PcItem("volume"),
+		readline.PcItem("brightness"),
 		readline.PcItem("say"),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
@@ -566,9 +671,12 @@ func replHelp() {
   status                         connection status
   tools                          list gateway tools
   avatar <face>                  idle|happy|thinking|sad|surprised|embarrassed|off
+  mouth <shape>                  closed|half|open|e|u
+  blink <on|off>
   move-head --yaw N --pitch N    yaw -90..90, pitch 5..85
   led --index N --r N --g N --b N
-  all-leds --r N --g N --b N
+  all-leds --r N --g N --b N  |  clear-leds
+  volume <0-100>  |  brightness <0-100>
   say <text>                     (needs gateway TTS extra)
   photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
