@@ -374,6 +374,11 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   （`avatar_images.local.cc/.h` を生成、git 無視。存在すれば placeholder の代わりに使われる）
   3. ESP-IDF/Docker でビルド（`espressif/idf:v5.5.2 ... release.py stackchan`）→ 4. 再フラッシュ（`--before default-reset`）。
 - ⇒ CLI 制御は全系統 OK。avatar 画像だけはプリビルドの制約で、ソースビルド案件。
+- **【実施・成功 2026-06-02】** WSL + ESP-IDF v5.5.2 で自作アバターを焼き込み、`avatar <face>` で
+  **実機画面の表情が切り替わることを確認**。手順: `docs/avatar-build-wsl.md`、画像生成: `scripts/gen_avatars.py`。
+  ハマり所: ①`git clone --recursive`（`smooth_ui_toolkit` サブモジュール）②`rm -rf build` 後に
+  `python scripts/release.py stackchan` ③Pillow は venv 内なら `--user` 無しで install。
+  書込みは `--before default-reset`（ボタン不要）。merged-binary は NVS リセット → WiFi/URL 再設定要。
 
 ### 起動・運用メモ
 - 実行: `STACKCHAN_TOKEN` 空 + `VISION_HOST=<PC-LAN-IP>` で `stackchan-cli <cmd>`。
