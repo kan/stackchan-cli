@@ -1,0 +1,29 @@
+# greet.txt — a simple greeting choreography
+# Run one-shot:   stackchan-cli source examples/greet.txt
+# Or in the REPL:  source examples/greet.txt
+# '#' lines are comments. sleep is in milliseconds.
+
+avatar happy
+all-leds --r 0 --g 200 --b 80
+
+# look around
+move-head --yaw 0 --pitch 35
+sleep 400
+move-head --yaw 25 --pitch 45
+sleep 400
+move-head --yaw -25 --pitch 45
+sleep 400
+move-head --yaw 0 --pitch 45
+
+# little mouth flap (open/close a few times)
+mouth open
+sleep 150
+mouth closed
+sleep 150
+mouth open
+sleep 150
+mouth closed
+
+sleep 300
+avatar idle
+clear-leds

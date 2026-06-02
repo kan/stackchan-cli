@@ -43,6 +43,12 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case "source", "run":
+		if err := cmdSource(args); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// one-shot: nil client => each handler spawns its own gateway.
@@ -98,6 +104,7 @@ func usage() {
 Usage:
   stackchan-cli <command> [flags]
   stackchan-cli repl                  Interactive session (gateway stays resident; fast)
+  stackchan-cli source <file>         Run a script file (sleep/repeat/# comments) in one session
 
 Commands:
   status                 Show gateway/device connection status (no device needed)
@@ -599,23 +606,115 @@ func cmdRepl(args []string) error {
 				return err
 			}
 
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
+			stop, derr := runLine(line, c)
+			if derr != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", derr)
 			}
-			toks := tokenize(line)
-			name, rest := toks[0], toks[1:]
-			switch name {
-			case "quit", "exit", "q":
+			if stop {
 				return nil
-			case "help", "?":
-				replHelp()
-			default:
-				if err := dispatch(name, rest, c); err != nil {
-					fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				}
 			}
 		}
+	})
+}
+
+// runLine executes one REPL/script line against client c. It handles blank /
+// '#'-comment lines, the meta commands (quit, help, sleep, repeat, source), and
+// otherwise dispatches to a device/tool command. stop=true ends the REPL/script.
+func runLine(line string, c *mcp.Client) (stop bool, err error) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return false, nil
+	}
+	toks := tokenize(line)
+	name, rest := toks[0], toks[1:]
+	switch name {
+	case "quit", "exit", "q":
+		return true, nil
+	case "help", "?":
+		replHelp()
+		return false, nil
+	case "sleep":
+		return false, doSleep(rest)
+	case "repeat":
+		return false, doRepeat(rest, c)
+	case "source", "run":
+		return false, doSource(rest, c)
+	default:
+		return false, dispatch(name, rest, c)
+	}
+}
+
+func doSleep(rest []string) error {
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: sleep <ms>")
+	}
+	ms, err := strconv.Atoi(rest[0])
+	if err != nil || ms < 0 {
+		return fmt.Errorf("sleep: invalid ms %q", rest[0])
+	}
+	time.Sleep(time.Duration(ms) * time.Millisecond)
+	return nil
+}
+
+func doRepeat(rest []string, c *mcp.Client) error {
+	if len(rest) < 2 {
+		return fmt.Errorf("usage: repeat <n> <command...>")
+	}
+	n, err := strconv.Atoi(rest[0])
+	if err != nil || n < 1 {
+		return fmt.Errorf("repeat: invalid count %q", rest[0])
+	}
+	cmdline := strings.Join(rest[1:], " ")
+	for i := 0; i < n; i++ {
+		stop, err := runLine(cmdline, c)
+		if err != nil {
+			return err
+		}
+		if stop {
+			break
+		}
+	}
+	return nil
+}
+
+// doSource runs each line of a script file through runLine. Per-line errors are
+// printed but do not abort the script.
+func doSource(rest []string, c *mcp.Client) error {
+	if len(rest) < 1 {
+		return fmt.Errorf("usage: source <file>")
+	}
+	data, err := os.ReadFile(rest[0])
+	if err != nil {
+		return err
+	}
+	for _, ln := range strings.Split(string(data), "\n") {
+		stop, err := runLine(strings.TrimRight(ln, "\r"), c)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		}
+		if stop {
+			break
+		}
+	}
+	return nil
+}
+
+// cmdSource runs a script file in a single one-shot gateway session.
+func cmdSource(args []string) error {
+	set, verbose := fs("source")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if set.NArg() < 1 {
+		return fmt.Errorf("source requires a file")
+	}
+	file := set.Arg(0)
+	return withClient(*verbose, func(c *mcp.Client) error {
+		fmt.Fprintln(os.Stderr, "waiting for device to connect...")
+		if err := waitConnected(c, 90*time.Second); err != nil {
+			return err
+		}
+		return doSource([]string{file}, c)
 	})
 }
 
@@ -652,6 +751,9 @@ func buildCompleter(c *mcp.Client) *readline.PrefixCompleter {
 		readline.PcItem("say"),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
+		readline.PcItem("sleep"),
+		readline.PcItem("repeat"),
+		readline.PcItem("source"),
 		readline.PcItem("help"),
 		readline.PcItem("quit"),
 		readline.PcItem("exit"),
@@ -680,6 +782,9 @@ func replHelp() {
   say <text>                     (needs gateway TTS extra)
   photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
+  sleep <ms>                     pause (for choreography)
+  repeat <n> <command...>        run a command n times
+  source <file>                  run commands from a file (# lines are comments)
   help | quit`)
 }
 

@@ -84,6 +84,23 @@ REPL の編集機能（`chzyer/readline`）:
 - **Ctrl-R**：履歴の逆引き検索（大文字小文字無視）
 - **行編集**：←→ / Home/End / Ctrl-A・E・U・W 等、**Ctrl-C** で行クリア（空行で終了）、**Ctrl-D** で終了
 
+### スクリプト / 演出
+
+REPL とスクリプトでは次のメタコマンドが使えます：
+- `#` 始まりの行はコメント
+- `sleep <ms>` … 待機（ミリ秒）
+- `repeat <n> <command...>` … コマンドを n 回
+- `source <file>` … ファイルの各行を実行
+
+表情×口×首×LED を時間差で並べて“振り付け”が作れます。one-shot の
+`stackchan-cli source <file>` なら **gateway を1回だけ起動して全行を実行**します。
+
+例（`examples/greet.txt`）:
+```
+stackchan-cli source examples/greet.txt
+# または REPL 内で:  source examples/greet.txt
+```
+
 ## 既知の制限
 
 - **one-shot 方式**：コマンド毎に gateway を起動/終了するため、デバイス再接続待ち（最大90s）で遅い。
