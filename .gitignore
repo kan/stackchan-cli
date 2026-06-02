@@ -2,6 +2,8 @@
 /stackchan-cli
 /stackchan-cli.exe
 *.exe
+*.exe~
+*~
 *.test
 
 # Python smoke-test caches
