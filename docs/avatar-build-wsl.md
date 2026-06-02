@@ -37,10 +37,15 @@ cd ~/esp/esp-idf
 
 ```bash
 cd ~
-git clone https://github.com/kisaragi-mochi/stackchan-mcp.git
+git clone --recursive https://github.com/kisaragi-mochi/stackchan-mcp.git
 cd ~/stackchan-mcp
 git checkout firmware-v1.8.0      # 今書き込んでいる版に合わせる
+git submodule update --init --recursive   # firmware/components/smooth_ui_toolkit 等を取得
 ```
+
+> `--recursive` を付け忘れた場合は、リポジトリのルートで
+> `git submodule update --init --recursive` を実行（`smooth_ui_toolkit` 等のサブモジュールが空だと
+> CMake が `Failed to resolve component 'smooth_ui_toolkit'` で失敗する）。
 
 ## 3. アバター画像を取り込み → local C 配列を生成
 
