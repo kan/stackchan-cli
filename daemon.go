@@ -8,6 +8,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -31,9 +32,9 @@ var execMu sync.Mutex
 func withOutput(w io.Writer, fn func()) {
 	execMu.Lock()
 	defer execMu.Unlock()
-	prev := out
-	out = w
-	defer func() { out = prev }()
+	prevOut, prevErr := out, errOut
+	out, errOut = w, w
+	defer func() { out, errOut = prevOut, prevErr }()
 	fn()
 }
 
@@ -41,16 +42,29 @@ func cmdDaemon(args []string) error {
 	set, verbose := fs("daemon")
 	connectTimeout := set.Int("connect-timeout", 90, "seconds to wait for the device on startup")
 	pollMs := set.Int("touch-poll", 150, "touch poll interval in ms (0 disables touch reactions)")
-	home, _ := os.UserHomeDir()
-	reactions := set.String("reactions", filepath.Join(home, ".stackchan", "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
+	reactions := set.String("reactions", filepath.Join(stackchanDir(), "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
-	reactionsDir = *reactions
+	// Report our own fatal error before flushing, so it reaches the log
+	// (main would print it after the timestamp relay is gone).
+	flush := timestampStderr()
+	err := runDaemon(*verbose, *connectTimeout, *pollMs, *reactions)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	}
+	flush()
+	if err != nil {
+		os.Exit(1)
+	}
+	return nil
+}
+
+func runDaemon(verbose bool, connectTimeout, pollMs int, reactions string) error {
+	reactionsDir = reactions
 	seedReactions(reactionsDir)
 
-	if conn, err := net.DialTimeout("tcp", ipcAddr, 200*time.Millisecond); err == nil {
-		_ = conn.Close()
+	if daemonAvailable() {
 		return fmt.Errorf("a daemon is already running on %s", ipcAddr)
 	}
 	ln, err := net.Listen("tcp", ipcAddr)
@@ -59,14 +73,25 @@ func cmdDaemon(args []string) error {
 	}
 	defer ln.Close()
 
-	return withClient(*verbose, func(c *mcp.Client) error {
-		fmt.Fprintln(os.Stderr, "daemon: gateway up; waiting for device...")
-		if err := waitConnected(c, time.Duration(*connectTimeout)*time.Second); err != nil {
-			fmt.Fprintf(os.Stderr, "daemon: %v (continuing; will react once it connects)\n", err)
-		} else {
-			fmt.Fprintln(os.Stderr, "daemon: device connected ✓")
+	// Warm up VOICEVOX in the background so the first reaction can speak.
+	go func() {
+		if err := ensureVoicevox(); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
 		}
-		fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch-poll %dms · reactions %s · Ctrl-C to stop\n", ipcAddr, *pollMs, reactionsDir)
+	}()
+
+	return withClient(verbose, func(c *mcp.Client) error {
+		// Only log the device connection; IPC is served right away so commands
+		// (e.g. status) don't hang while the device is away.
+		fmt.Fprintln(os.Stderr, "daemon: gateway up; waiting for device...")
+		go func() {
+			if err := waitConnected(c, time.Duration(connectTimeout)*time.Second); err != nil {
+				fmt.Fprintf(os.Stderr, "daemon: %v (continuing; will react once it connects)\n", err)
+			} else {
+				fmt.Fprintln(os.Stderr, "daemon: device connected ✓")
+			}
+		}()
+		fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch-poll %dms · reactions %s · Ctrl-C to stop\n", ipcAddr, pollMs, reactionsDir)
 
 		stop := make(chan struct{})
 		var stopOnce sync.Once
@@ -80,8 +105,8 @@ func cmdDaemon(args []string) error {
 			shutdown()
 		}()
 
-		if *pollMs > 0 {
-			go touchWatch(c, time.Duration(*pollMs)*time.Millisecond, stop)
+		if pollMs > 0 {
+			go touchWatch(c, time.Duration(pollMs)*time.Millisecond, stop)
 		}
 
 		for {
@@ -111,9 +136,52 @@ func handleConn(conn net.Conn, c *mcp.Client) {
 	line = strings.TrimRight(line, "\r\n")
 	withOutput(conn, func() {
 		if _, err := runLine(line, c); err != nil {
-			fmt.Fprintf(conn, "error: %v\n", err)
+			// The status must stay on one line.
+			msg := strings.ReplaceAll(err.Error(), "\n", " ")
+			fmt.Fprintf(conn, "%serror %s\n", ipcStatusPrefix, msg)
+			return
 		}
+		fmt.Fprintf(conn, "%sok\n", ipcStatusPrefix)
 	})
+}
+
+// ipcStatusPrefix marks the last line of a daemon reply, which carries the
+// command's outcome ("ok" or "error <msg>") so the client can set its exit code.
+const ipcStatusPrefix = "\x1estackchan-ipc:"
+
+// timestampStderr prefixes every stderr line with the time, so the daemon log
+// shows when each event happened. It swaps os.Stderr for a pipe, which also
+// covers children that inherit os.Stderr. The returned flush restores
+// os.Stderr and waits (briefly) until everything written so far is relayed.
+func timestampStderr() (flush func()) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return func() {}
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		br := bufio.NewReader(r) // no line-length limit, unlike bufio.Scanner
+		for {
+			line, err := br.ReadString('\n')
+			if line != "" {
+				fmt.Fprintf(orig, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), strings.TrimRight(line, "\r\n"))
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return func() {
+		os.Stderr = orig
+		_ = w.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second): // a child may still hold the pipe
+		}
+	}
 }
 
 // touchWatch polls get_touch_state and classifies the gesture by *contact
@@ -252,42 +320,69 @@ func daemonAvailable() bool {
 	return true
 }
 
-// sendToDaemon sends one command line to a running daemon and copies the reply
-// to stdout. Errors if no daemon is reachable.
-func sendToDaemon(line string) error {
-	conn, err := net.DialTimeout("tcp", ipcAddr, time.Second)
+// sendToDaemon sends one command to a running daemon and streams the reply to
+// stdout. forwarded is false when no daemon accepted the connection, so the
+// caller can fall back to running the command itself; err is the command's
+// failure as reported by the daemon (or a broken connection).
+func sendToDaemon(argv []string) (forwarded bool, err error) {
+	conn, err := net.DialTimeout("tcp", ipcAddr, 250*time.Millisecond)
 	if err != nil {
-		return err
+		return false, nil
 	}
 	defer conn.Close()
-	if _, err := fmt.Fprintf(conn, "%s\n", line); err != nil {
-		return err
+	if _, err := fmt.Fprintf(conn, "%s\n", quoteArgs(absSourcePath(argv))); err != nil {
+		return true, err
 	}
 	if cw, ok := conn.(interface{ CloseWrite() error }); ok {
 		_ = cw.CloseWrite()
 	}
-	_, err = io.Copy(os.Stdout, conn)
-	return err
-}
-
-// forwardToDaemon sends argv to a running daemon (one-shot path). Returns
-// (false, nil) when no daemon is listening so the caller can fall back.
-func forwardToDaemon(argv []string) (bool, error) {
-	if !daemonAvailable() {
-		return false, nil
+	sc := bufio.NewScanner(conn)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		line := sc.Text()
+		if status, ok := strings.CutPrefix(line, ipcStatusPrefix); ok {
+			if msg, failed := strings.CutPrefix(status, "error "); failed {
+				return true, errors.New(msg)
+			}
+			return true, nil
+		}
+		fmt.Println(line)
 	}
-	return true, sendToDaemon(quoteArgs(argv))
+	if err := sc.Err(); err != nil {
+		return true, err
+	}
+	return true, errors.New("daemon closed the connection before reporting a result")
 }
 
-// quoteArgs rebuilds a command line, quoting tokens that contain whitespace so
-// the daemon's tokenizer reassembles them correctly.
+// absSourcePath makes the script path of a `source`/`run` command absolute,
+// since the daemon resolves relative paths against its own working directory.
+func absSourcePath(argv []string) []string {
+	if len(argv) < 2 || (argv[0] != "source" && argv[0] != "run") {
+		return argv
+	}
+	last := len(argv) - 1
+	abs, err := filepath.Abs(argv[last])
+	if err != nil {
+		return argv
+	}
+	out := append([]string(nil), argv...)
+	out[last] = abs
+	return out
+}
+
+// quoteArgs rebuilds a command line so the daemon's tokenizer reassembles the
+// same tokens: tokens with whitespace or quote characters are wrapped in the
+// quote style they don't contain (the tokenizer has no escapes).
 func quoteArgs(argv []string) string {
 	parts := make([]string, len(argv))
 	for i, a := range argv {
-		if a == "" || strings.ContainsAny(a, " \t") {
-			parts[i] = `"` + a + `"`
-		} else {
+		switch {
+		case a != "" && !strings.ContainsAny(a, " \t\"'"):
 			parts[i] = a
+		case strings.Contains(a, `"`):
+			parts[i] = `'` + a + `'`
+		default:
+			parts[i] = `"` + a + `"`
 		}
 	}
 	return strings.Join(parts, " ")

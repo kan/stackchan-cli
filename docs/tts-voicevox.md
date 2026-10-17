@@ -6,9 +6,20 @@
 ## 必要なもの
 
 ### 1. VOICEVOX エンジン（外部・:50021）
-- [VOICEVOX](https://voicevox.hiroshiba.jp/) の Windows 版を入れて起動するだけで
-  `http://127.0.0.1:50021` にエンジンが立つ（GUI アプリ / ENGINE 単体どちらでも）。
-- 別ホスト/ポートなら `STACKCHAN_VOICEVOX_URL` で上書き（既定 `http://127.0.0.1:50021`）。
+- [VOICEVOX](https://voicevox.hiroshiba.jp/) の Windows 版を入れておく。GUI を起動する必要はない。
+- **CLI がエンジンを自動起動する**: エンジンが応答しないとき、`vv-engine\run.exe` を
+  **ウィンドウ無しの子プロセス**として起動し、準備完了（約4秒）を待ってから発話する。
+  - daemon は起動時に立ち上げて保持し、daemon の終了と一緒に止める。
+  - daemon 無しの one-shot `say` は、その都度起動して終了時に止める。
+  - GUI などで既にエンジンが動いていれば、それをそのまま使う。
+  - エンジンのログは `~/.stackchan/voicevox.log`。
+- 関連する環境変数:
+
+  | 変数 | 意味 |
+  |---|---|
+  | `STACKCHAN_VOICEVOX_URL` | エンジンの URL（既定 `http://127.0.0.1:50021`）。localhost 以外なら自動起動しない |
+  | `STACKCHAN_VOICEVOX_ENGINE` | `run.exe` のパス（既定は `%ProgramFiles%\VOICEVOX\vv-engine\run.exe`、次に `%LOCALAPPDATA%\Programs\VOICEVOX\vv-engine\run.exe`） |
+  | `STACKCHAN_VOICEVOX_AUTOSTART` | `0` で自動起動しない |
 
 ### 2. gateway に opuslib（Opus エンコード）
 GitHub main 版 gateway は VOICEVOX エンジン実装を内蔵。Opus 化用の `opuslib` を追加する：
@@ -48,6 +59,6 @@ stackchan-cli say --face "" "顔を変えない"   # 発話後の表情変更を
   `tts stop` を送り、口パクが止まる（CLI のグレースフル終了で確実に届く）。
 
 ## 仕組み / 注意
-- 条件: **VOICEVOX 起動中 + デバイス接続中**。
+- 条件: **VOICEVOX が使える（自動起動を含む）+ デバイス接続中**。
 - LGPL の VOICEVOX は別プロセス（HTTP）として動かす（gateway は HTTP 越しに呼ぶだけ）。
 - 音量は `volume <0-100>`、画面輝度は `brightness <0-100>` で調整可。

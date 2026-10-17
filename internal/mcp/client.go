@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -61,7 +62,10 @@ type Tool struct {
 // ToolResult is the result of a tools/call.
 type ToolResult struct {
 	Content []ContentBlock `json:"content"`
-	IsError bool           `json:"isError"`
+	// IsError is also set when the text is JSON with an "error" field: the
+	// gateway reports many failures (e.g. "No ESP32 device connected", TTS
+	// errors) that way with isError:false.
+	IsError bool `json:"isError"`
 }
 
 // ContentBlock is one piece of a tool result (we mainly use text).
@@ -72,13 +76,21 @@ type ContentBlock struct {
 
 // Text returns the concatenated text content of the result.
 func (r ToolResult) Text() string {
-	out := ""
+	var sb strings.Builder
 	for _, c := range r.Content {
 		if c.Type == "text" {
-			out += c.Text
+			sb.WriteString(c.Text)
 		}
 	}
-	return out
+	return sb.String()
+}
+
+// hasErrorField reports whether a text result is JSON with a non-null "error" field.
+func hasErrorField(text string) bool {
+	var r struct {
+		Error any `json:"error"`
+	}
+	return json.Unmarshal([]byte(text), &r) == nil && r.Error != nil
 }
 
 // Start spawns the gateway executable and begins the stdout read loop.
@@ -143,6 +155,10 @@ func (c *Client) readLoop(stdout io.Reader) {
 }
 
 func (c *Client) call(method string, params any) (json.RawMessage, error) {
+	return c.callTimeout(method, params, c.timeout)
+}
+
+func (c *Client) callTimeout(method string, params any, timeout time.Duration) (json.RawMessage, error) {
 	c.mu.Lock()
 	id := c.nextID
 	c.nextID++
@@ -163,11 +179,11 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 			return nil, fmt.Errorf("%s: rpc error %d: %s", method, resp.Error.Code, resp.Error.Message)
 		}
 		return resp.Result, nil
-	case <-time.After(c.timeout):
+	case <-time.After(timeout):
 		c.mu.Lock()
 		delete(c.pending, id)
 		c.mu.Unlock()
-		return nil, fmt.Errorf("%s: timed out after %s", method, c.timeout)
+		return nil, fmt.Errorf("%s: timed out after %s", method, timeout)
 	}
 }
 
@@ -218,10 +234,19 @@ func (c *Client) ListTools() ([]Tool, error) {
 
 // CallTool invokes a tool by name with the given arguments.
 func (c *Client) CallTool(name string, args map[string]any) (ToolResult, error) {
-	raw, err := c.call("tools/call", map[string]any{
+	return c.CallToolTimeout(name, args, 0)
+}
+
+// CallToolTimeout is CallTool with an explicit timeout (0 = client default),
+// for tools that block for a long time (say waits until playback ends).
+func (c *Client) CallToolTimeout(name string, args map[string]any, timeout time.Duration) (ToolResult, error) {
+	if timeout <= 0 {
+		timeout = c.timeout
+	}
+	raw, err := c.callTimeout("tools/call", map[string]any{
 		"name":      name,
 		"arguments": args,
-	})
+	}, timeout)
 	if err != nil {
 		return ToolResult{}, err
 	}
@@ -229,10 +254,12 @@ func (c *Client) CallTool(name string, args map[string]any) (ToolResult, error) 
 	if err := json.Unmarshal(raw, &res); err != nil {
 		return ToolResult{}, fmt.Errorf("tools/call %s: decode: %w", name, err)
 	}
+	if hasErrorField(res.Text()) {
+		res.IsError = true
+	}
 	return res, nil
 }
 
-// Close terminates the gateway child process.
 // Close shuts the gateway down gracefully: closing stdin signals EOF to the
 // stdio MCP server, which lets the gateway flush pending WebSocket writes and
 // close the device connection cleanly (so the device leaves the "speaking"

@@ -10,6 +10,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -30,6 +31,9 @@ import (
 // forwarded command's output reaches that client.
 var out io.Writer = os.Stdout
 
+// errOut receives per-line script errors (doSource); redirected like out.
+var errOut io.Writer = os.Stderr
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -37,6 +41,7 @@ func main() {
 	}
 	cmd := os.Args[1]
 	args := os.Args[2:]
+	killChildrenOnExit()
 
 	switch cmd {
 	case "-h", "--help", "help":
@@ -44,12 +49,6 @@ func main() {
 		return
 	case "repl":
 		if err := cmdRepl(args); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	case "source", "run":
-		if err := cmdSource(args); err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(1)
 		}
@@ -65,14 +64,15 @@ func main() {
 	// If a daemon is running, forward to it (fast; reuses its resident gateway,
 	// avoiding a second gateway / port conflict). Otherwise spawn a one-shot
 	// gateway per command.
-	if forwarded, err := forwardToDaemon(os.Args[1:]); forwarded {
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+	forwarded, err := sendToDaemon(os.Args[1:])
+	if !forwarded {
+		if cmd == "source" || cmd == "run" {
+			err = cmdSource(args)
+		} else {
+			err = dispatch(cmd, args, nil)
 		}
-		return
 	}
-	if err := dispatch(cmd, args, nil); err != nil {
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -127,6 +127,8 @@ Usage:
   stackchan-cli source <file>         Run a script file (sleep/repeat/# comments) in one session
   stackchan-cli daemon                Resident gateway: touch reactions + fast command forwarding
 
+While a daemon is running, commands, repl and source are forwarded to it.
+
 Commands:
   status                 Show gateway/device connection status (no device needed)
   tools                  List the tools the gateway exposes (no device needed)
@@ -140,7 +142,7 @@ Commands:
   clear-leds
   volume <0-100>
   brightness <0-100>
-  say [--speaker N] <text>     speak via VOICEVOX (needs a running engine)
+  say [--speaker N] [--face F] <text>   speak via VOICEVOX (engine auto-started if needed)
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
 
@@ -148,12 +150,15 @@ Environment:
   STACKCHAN_MCP_EXE   path to the gateway executable (default: PATH / ~/.local/bin)
   STACKCHAN_TOKEN     bearer token shared with the firmware (empty = no auth)
   VISION_HOST         this host's LAN IP for 'photo' (auto-detected if unset)
+  STACKCHAN_VOICEVOX_URL        VOICEVOX engine URL (default http://127.0.0.1:50021)
+  STACKCHAN_VOICEVOX_ENGINE     path to vv-engine\run.exe (default: standard install dirs)
+  STACKCHAN_VOICEVOX_AUTOSTART  0 = never start the engine automatically
 
 Per-command flags:
   --verbose           forward the gateway's stderr logs (one-shot mode)
 
-In one-shot mode every command restarts the gateway, so device commands wait up
-to 90s for the StackChan to reconnect. Use 'repl' for snappy repeated control.
+Without a daemon, every command restarts the gateway, so device commands wait
+up to 90s for the StackChan to reconnect. Use 'daemon' or 'repl' for snappy control.
 `)
 }
 
@@ -247,21 +252,40 @@ func callAndPrint(verbose, waitDevice bool, tool string, args map[string]any, ou
 	oneShot := outer == nil
 	return withClientOrReuse(verbose, outer, func(c *mcp.Client) error {
 		if waitDevice && oneShot {
-			fmt.Fprintln(os.Stderr, "waiting for device to connect...")
-			if err := waitConnected(c, 90*time.Second); err != nil {
+			if err := waitForDevice(c); err != nil {
 				return err
 			}
 		}
-		res, err := c.CallTool(tool, args)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(out, res.Text())
-		if res.IsError {
-			return fmt.Errorf("tool %s reported an error", tool)
-		}
-		return nil
+		_, err := callTool(c, tool, args)
+		return err
 	})
+}
+
+// waitForDevice blocks a one-shot command until the freshly started gateway
+// sees the StackChan reconnect.
+func waitForDevice(c *mcp.Client) error {
+	fmt.Fprintln(os.Stderr, "waiting for device to connect...")
+	return waitConnected(c, 90*time.Second)
+}
+
+// longToolTimeouts lists tools that block longer than the client default.
+var longToolTimeouts = map[string]time.Duration{
+	"say":        5 * time.Minute, // blocks until playback ends
+	"take_photo": 60 * time.Second,
+}
+
+// callTool runs one tool, prints its text result to out, and returns an error
+// (so the exit code is non-zero) when the tool failed.
+func callTool(c *mcp.Client, tool string, args map[string]any) (mcp.ToolResult, error) {
+	res, err := c.CallToolTimeout(tool, args, longToolTimeouts[tool])
+	if err != nil {
+		return res, err
+	}
+	fmt.Fprintln(out, res.Text())
+	if res.IsError {
+		return res, fmt.Errorf("tool %s failed", tool)
+	}
+	return res, nil
 }
 
 // waitConnected polls get_status until the device reports connected:true.
@@ -340,9 +364,9 @@ func cmdWait(args []string, c *mcp.Client) error {
 				return err
 			}
 			txt := strings.Join(strings.Fields(res.Text()), " ")
-			fmt.Printf("[%s] %s\n", time.Now().Format("15:04:05"), txt)
+			fmt.Fprintf(out, "[%s] %s\n", time.Now().Format("15:04:05"), txt)
 			if isConnected(txt) {
-				fmt.Println("device connected ✓")
+				fmt.Fprintln(out, "device connected ✓")
 				return nil
 			}
 			if time.Now().After(deadline) {
@@ -495,26 +519,30 @@ func cmdSay(args []string, c *mcp.Client) error {
 	if *speaker > 0 {
 		sayArgs["speaker_id"] = *speaker
 	}
+	// Start the engine while a one-shot gateway waits for the device.
+	engineReady := make(chan error, 1)
+	go func() { engineReady <- ensureVoicevox() }()
 	oneShot := c == nil
 	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
 		if oneShot {
-			fmt.Fprintln(os.Stderr, "waiting for device to connect...")
-			if err := waitConnected(c, 90*time.Second); err != nil {
+			if err := waitForDevice(c); err != nil {
 				return err
 			}
 		}
-		res, err := c.CallTool("say", sayArgs)
-		if err != nil {
-			return err
+		if err := <-engineReady; err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		}
-		fmt.Fprintln(out, res.Text())
-		if res.IsError {
-			return fmt.Errorf("say reported an error")
+		if _, err := callTool(c, "say", sayArgs); err != nil {
+			return err
 		}
 		// say() blocks until playback finishes, so the mouth has stopped by now;
 		// settle on a resting face.
 		if *face != "" {
-			if _, err := c.CallTool("set_avatar", map[string]any{"face": *face}); err != nil {
+			res, err := c.CallTool("set_avatar", map[string]any{"face": *face})
+			if err == nil && res.IsError {
+				err = fmt.Errorf("%s", res.Text())
+			}
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "warning: set_avatar %s failed: %v\n", *face, err)
 			}
 		}
@@ -532,18 +560,13 @@ func cmdPhoto(args []string, c *mcp.Client) error {
 	oneShot := c == nil
 	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
 		if oneShot {
-			fmt.Fprintln(os.Stderr, "waiting for device to connect...")
-			if err := waitConnected(c, 90*time.Second); err != nil {
+			if err := waitForDevice(c); err != nil {
 				return err
 			}
 		}
-		res, err := c.CallTool("take_photo", map[string]any{"question": *question})
+		res, err := callTool(c, "take_photo", map[string]any{"question": *question})
 		if err != nil {
 			return err
-		}
-		fmt.Fprintln(out, res.Text())
-		if res.IsError {
-			return fmt.Errorf("take_photo reported an error")
 		}
 		path := savedImagePath(res.Text())
 		if path == "" {
@@ -558,9 +581,14 @@ func cmdPhoto(args []string, c *mcp.Client) error {
 	})
 }
 
-func capturesDir() string {
+// stackchanDir is ~/.stackchan, home of captures, reactions, history and logs.
+func stackchanDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".stackchan", "captures")
+	return filepath.Join(home, ".stackchan")
+}
+
+func capturesDir() string {
+	return filepath.Join(stackchanDir(), "captures")
 }
 
 // savedImagePath returns the capture file path: prefer image_path from the tool
@@ -593,10 +621,11 @@ func savedImagePath(resultText string) string {
 	return newest
 }
 
-// openInViewer opens a file with the OS default handler (Windows shell).
+// openInViewer opens a file with the OS default handler (Windows shell). The
+// viewer is started outside our kill-on-exit job so it outlives the CLI.
 func openInViewer(path string) {
 	cmd := exec.Command("cmd", "/c", "start", "", path)
-	if err := cmd.Start(); err != nil {
+	if err := startDetached(cmd); err != nil {
 		fmt.Fprintf(os.Stderr, "could not open %s: %v\n", path, err)
 	}
 }
@@ -689,8 +718,12 @@ func replLoop(c *mcp.Client, remote bool, toolNames []string) error {
 			return nil
 		}
 		if remote {
-			if err := sendToDaemon(trimmed); err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v (daemon gone?)\n", err)
+			forwarded, err := sendToDaemon(tokenize(trimmed))
+			if !forwarded {
+				err = errors.New("daemon not reachable (daemon gone?)")
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			}
 			continue
 		}
@@ -767,21 +800,30 @@ func doRepeat(rest []string, c *mcp.Client) error {
 // doSource runs each line of a script file through runLine. Per-line errors are
 // printed but do not abort the script.
 func doSource(rest []string, c *mcp.Client) error {
-	if len(rest) < 1 {
+	set, _ := fs("source") // accepts (and ignores) --verbose, as cmdSource does
+	if err := set.Parse(rest); err != nil {
+		return err
+	}
+	if set.NArg() < 1 {
 		return fmt.Errorf("usage: source <file>")
 	}
-	data, err := os.ReadFile(rest[0])
+	data, err := os.ReadFile(set.Arg(0))
 	if err != nil {
 		return err
 	}
+	failed := 0
 	for _, ln := range strings.Split(string(data), "\n") {
 		stop, err := runLine(strings.TrimRight(ln, "\r"), c)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			failed++
+			fmt.Fprintf(errOut, "error: %v\n", err)
 		}
 		if stop {
 			break
 		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%s: %d line(s) failed", set.Arg(0), failed)
 	}
 	return nil
 }
@@ -797,8 +839,7 @@ func cmdSource(args []string) error {
 	}
 	file := set.Arg(0)
 	return withClient(*verbose, func(c *mcp.Client) error {
-		fmt.Fprintln(os.Stderr, "waiting for device to connect...")
-		if err := waitConnected(c, 90*time.Second); err != nil {
+		if err := waitForDevice(c); err != nil {
 			return err
 		}
 		return doSource([]string{file}, c)
@@ -806,8 +847,7 @@ func cmdSource(args []string) error {
 }
 
 func replHistoryFile() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".stackchan", "repl_history")
+	return filepath.Join(stackchanDir(), "repl_history")
 }
 
 // buildCompleter builds Tab completion for command names, avatar faces, common

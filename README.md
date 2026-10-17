@@ -102,8 +102,13 @@ stackchan-cli say "やっほー"
 - **反応は編集可能なスクリプト**：daemon 初回起動時に `~/.stackchan/reactions/tap.txt` と `stroke.txt`
   を雛形生成。中身は REPL コマンド（`avatar`/`mouth`/`led`/`say`/`sleep` など）を行で並べるだけ。
   **再ビルド不要**で、ジェスチャ発火時にその場のファイル内容が実行される（`--reactions <dir>` で場所変更）。
-- daemon 稼働中は **one-shot も `repl` も**自動で IPC 転送される（その常駐 gateway を共有。
-  `repl` は daemon があれば各行を転送、無ければ自前 gateway を起動）。
+- daemon 稼働中は **one-shot も `repl` も `source` も**自動で IPC 転送される（その常駐 gateway を共有。
+  `repl` は daemon があれば各行を転送、無ければ自前 gateway を起動）。転送したコマンドが失敗すると
+  終了コードは 1 になる。
+- daemon は起動時に **VOICEVOX エンジンをウィンドウ無しで自動起動**する（後述）。
+- daemon のログ（stderr）は各行に時刻が付く。
+- gateway・VOICEVOX エンジンなどの子プロセスは Windows の Job オブジェクトに入れてあり、
+  daemon が強制終了されても一緒に終了する（ポート 8765/8766/50021 を掴んだまま残らない）。
 
 ### スクリプト / 演出
 
@@ -124,9 +129,12 @@ stackchan-cli source examples/greet.txt
 
 ## 既知の制限
 
-- **one-shot 方式**：コマンド毎に gateway を起動/終了するため、デバイス再接続待ち（最大90s）で遅い。
-  連続操作には **`repl`（gateway 常駐）** を使うと即時実行。daemon+IPC 化（バックグラウンド常駐）は今後の課題。
-- `say`（TTS）は VOICEVOX エンジン稼働＋gateway に opuslib（+Windows は opus.dll）が要る。
+- **one-shot 方式**：daemon が無いと、コマンド毎に gateway を起動/終了するため、デバイス再接続待ち
+  （最大90s）で遅い。連続操作には **`daemon`** か **`repl`（gateway 常駐）** を使う。
+- gateway がエラーを `{"error": ...}` の形で返したとき（デバイス未接続、TTS 失敗など）は失敗として
+  扱い、終了コード 1 を返す。
+- `say`（TTS）は VOICEVOX エンジン＋gateway に opuslib（+Windows は opus.dll）が要る。エンジンが
+  動いていなければ CLI が `vv-engine\run.exe` をウィンドウ無しで自動起動する。
   セットアップは [`docs/tts-voicevox.md`](docs/tts-voicevox.md)。既定話者は 8=春日部つむぎ、
   発話後は自動で表情 `embarrassed`（`say --speaker N` / `say --face <name>` で変更可）。
   `listen`（STT）は別途 STT extra が必要（未セットアップ）。
