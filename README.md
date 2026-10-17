@@ -97,8 +97,14 @@ stackchan-cli avatar happy
 stackchan-cli say "やっほー"
 ```
 
-- **タッチ反応**：頭部センサ（zone0/1/2）に手のひらで触れると、接触時間で tap/stroke を分類して反応
-  （〜1秒=tap / それ以上=stroke）。`daemon --touch-poll 0` で無効、`--touch-poll <ms>` で間隔変更。
+- **タッチ反応**：本体（firmware 1.9 以降）が頭部タッチを自分で検出し、gateway が
+  `stackchan/event` 通知として daemon に届ける（daemon が `~/.stackchan/notify.yml` を作り、
+  `STACKCHAN_NOTIFY_CONFIG` で gateway に渡す）。daemon は接触時間で tap/stroke を分類して反応
+  （〜1秒=tap / それ以上=stroke、`--tap-max <ms>` で変更、`--touch=false` で無効）。
+  本体への問い合わせ（ポーリング）はしないので、通信が遅くても取りこぼさない。
+- **自作アバターの自動送信**：本体が接続するたび（再起動後も）、`~/.stackchan/avatar/*.png`（14 枚）を
+  RGB565 に変換して `load_avatar_set` で送る。送った顔は本体の RAM にしか残らないため。
+  `--avatar=false` で無効。手動では `stackchan-cli avatar-load`。
 - **反応は編集可能なスクリプト**：daemon 初回起動時に `~/.stackchan/reactions/tap.txt` と `stroke.txt`
   を雛形生成。中身は REPL コマンド（`avatar`/`mouth`/`led`/`say`/`sleep` など）を行で並べるだけ。
   **再ビルド不要**で、ジェスチャ発火時にその場のファイル内容が実行される（`--reactions <dir>` で場所変更）。
@@ -139,6 +145,14 @@ stackchan-cli source examples/greet.txt
   発話後は自動で表情 `embarrassed`（`say --speaker N` / `say --face <name>` で変更可）。
   `listen`（STT）は別途 STT extra が必要（未セットアップ）。
 - mDNS 自動検出が通らない環境では、デバイスに WebSocket URL を明示設定してください。
+- **PC の IP が変わったとき**（デバイスが gateway に繋がらなくなる）：
+  - デバイスが繋がっている間に変えるなら
+    `stackchan-cli call gateway_config_set --json '{"url":"ws://<PC-IP>:8765/"}'`（次の再接続から有効）。
+  - 繋がらなくなった後は、USB 接続して
+    `py scripts/nvs_set_ws_url.py --port COM3 --url ws://<PC-IP>:8765/`。NVS の `websocket.url` だけを
+    書き換えるので Wi-Fi 設定は残る（captive portal に入る必要がない）。元の URL より長い URL は不可。
+- 想定バージョン：firmware **1.17.0** / gateway **0.18.0**（タッチ通知・`load_avatar_set`・
+  `gateway_config_set` はこの組み合わせが前提）。
 
 ## ドキュメント
 

@@ -40,16 +40,19 @@ func withOutput(w io.Writer, fn func()) {
 
 func cmdDaemon(args []string) error {
 	set, verbose := fs("daemon")
-	connectTimeout := set.Int("connect-timeout", 90, "seconds to wait for the device on startup")
-	pollMs := set.Int("touch-poll", 150, "touch poll interval in ms (0 disables touch reactions)")
-	reactions := set.String("reactions", filepath.Join(stackchanDir(), "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
+	opts := daemonOptions{}
+	set.BoolVar(&opts.touch, "touch", true, "react to head touch events")
+	set.IntVar(&opts.tapMaxMs, "tap-max", 1000, "touches up to this many ms are a tap; longer ones a stroke")
+	set.BoolVar(&opts.avatar, "avatar", true, "send ~/.stackchan/avatar/*.png to the device on every (re)connect")
+	set.StringVar(&opts.reactions, "reactions", filepath.Join(stackchanDir(), "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
+	opts.verbose = *verbose
 	// Report our own fatal error before flushing, so it reaches the log
 	// (main would print it after the timestamp relay is gone).
 	flush := timestampStderr()
-	err := runDaemon(*verbose, *connectTimeout, *pollMs, *reactions)
+	err := runDaemon(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 	}
@@ -60,13 +63,39 @@ func cmdDaemon(args []string) error {
 	return nil
 }
 
-func runDaemon(verbose bool, connectTimeout, pollMs int, reactions string) error {
-	reactionsDir = reactions
+type daemonOptions struct {
+	verbose   bool
+	touch     bool
+	tapMaxMs  int
+	avatar    bool
+	reactions string
+}
+
+func runDaemon(opts daemonOptions) error {
+	reactionsDir = opts.reactions
 	seedReactions(reactionsDir)
+	var gatewayEnv []string
+	if opts.touch {
+		// Ask the gateway to push touch events as "stackchan/event" notifications.
+		if user := os.Getenv("STACKCHAN_NOTIFY_CONFIG"); user != "" {
+			fmt.Fprintf(os.Stderr, "daemon: using STACKCHAN_NOTIFY_CONFIG=%s; touch reactions need legacy_event.enabled: true in it\n", user)
+		} else {
+			path, err := writeNotifyConfig()
+			if err != nil {
+				return fmt.Errorf("notify config: %w", err)
+			}
+			gatewayEnv = append(gatewayEnv, "STACKCHAN_NOTIFY_CONFIG="+path)
+		}
+	}
 
 	if daemonAvailable() {
 		return fmt.Errorf("a daemon is already running on %s", ipcAddr)
 	}
+	// A gateway that was just stopped may still hold its ports for a moment;
+	// starting ours then fails with "gateway closed stdout". Wait before
+	// opening IPC, so clients fall back instead of queuing on a daemon that
+	// is not serving yet.
+	waitPortsFree([]string{":8765", ":8766"}, 15*time.Second)
 	ln, err := net.Listen("tcp", ipcAddr)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", ipcAddr, err)
@@ -80,48 +109,59 @@ func runDaemon(verbose bool, connectTimeout, pollMs int, reactions string) error
 		}
 	}()
 
-	return withClient(verbose, func(c *mcp.Client) error {
-		// Only log the device connection; IPC is served right away so commands
-		// (e.g. status) don't hang while the device is away.
-		fmt.Fprintln(os.Stderr, "daemon: gateway up; waiting for device...")
-		go func() {
-			if err := waitConnected(c, time.Duration(connectTimeout)*time.Second); err != nil {
-				fmt.Fprintf(os.Stderr, "daemon: %v (continuing; will react once it connects)\n", err)
-			} else {
-				fmt.Fprintln(os.Stderr, "daemon: device connected ✓")
+	return withClient(opts.verbose, func(c *mcp.Client) error {
+		return serveDaemon(c, ln, opts)
+	}, gatewayEnv...)
+}
+
+func serveDaemon(c *mcp.Client, ln net.Listener, opts daemonOptions) error {
+	fmt.Fprintln(os.Stderr, "daemon: gateway up; waiting for device...")
+	fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch %v (tap ≤ %dms) · reactions %s · Ctrl-C to stop\n", ipcAddr, opts.touch, opts.tapMaxMs, reactionsDir)
+
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	shutdown := func() { stopOnce.Do(func() { close(stop); ln.Close() }) }
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	go func() {
+		<-sig
+		fmt.Fprintln(os.Stderr, "\ndaemon: shutting down...")
+		shutdown()
+	}()
+
+	// IPC is served right away; the device connection is only watched, so
+	// commands (e.g. status) never hang while the device is away.
+	go watchSessions(c, opts.avatar, stop)
+	if opts.touch {
+		// Unbuffered: a touch is handed over only while the reactor is idle,
+		// so touches during a reaction are dropped instead of queued.
+		touches := make(chan touchEvent)
+		c.OnNotification(func(method string, params json.RawMessage) {
+			var ev touchEvent
+			if method != "stackchan/event" || json.Unmarshal(params, &ev) != nil || ev.EventType != "touch" {
+				return
 			}
-		}()
-		fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch-poll %dms · reactions %s · Ctrl-C to stop\n", ipcAddr, pollMs, reactionsDir)
-
-		stop := make(chan struct{})
-		var stopOnce sync.Once
-		shutdown := func() { stopOnce.Do(func() { close(stop); ln.Close() }) }
-
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt)
-		go func() {
-			<-sig
-			fmt.Fprintln(os.Stderr, "\ndaemon: shutting down...")
-			shutdown()
-		}()
-
-		if pollMs > 0 {
-			go touchWatch(c, time.Duration(pollMs)*time.Millisecond, stop)
-		}
-
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				select {
-				case <-stop:
-					return nil
-				default:
-					continue
-				}
+			select { // never block the read loop
+			case touches <- ev:
+			default:
 			}
-			go handleConn(conn, c)
+		})
+		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, stop)
+	}
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-stop:
+				return nil
+			default:
+				continue
+			}
 		}
-	})
+		go handleConn(conn, c)
+	}
 }
 
 // handleConn reads one command line from an IPC client, runs it against the
@@ -184,68 +224,110 @@ func timestampStderr() (flush func()) {
 	}
 }
 
-// touchWatch polls get_touch_state and classifies the gesture by *contact
-// duration* (the firmware's own tap/stroke label skews heavily to "stroke"):
-// a short cover-and-release is a tap; a longer hold is a stroke. Reacting on
-// release (or after a long hold) makes both reliable with a palm-sized touch.
-func touchWatch(c *mcp.Client, interval time.Duration, stop <-chan struct{}) {
-	const tapMax = 1000 * time.Millisecond     // release within this => tap
-	const strokeHold = 1800 * time.Millisecond // held this long => stroke mid-contact
-	const cooldown = 2 * time.Second
+// touchEvent is the params of the gateway's "stackchan/event" notification.
+// The firmware detects touches locally at 100 Hz and reports each finished
+// gesture with its contact duration, so nothing is lost to slow Wi-Fi.
+type touchEvent struct {
+	EventType  string `json:"event_type"`
+	Subtype    string `json:"subtype"`
+	DurationMs int    `json:"duration_ms"`
+}
 
-	var touchStart time.Time // zero = not currently touching
-	reacted := false         // already reacted for the current contact
-	lastReact := time.Time{}
-
-	t := time.NewTicker(interval)
-	defer t.Stop()
+// reactToTouches classifies each touch by contact duration (the firmware's
+// own label calls anything ≥ 400 ms a stroke, which is too eager) and runs
+// the matching reaction. Touches arriving during a reaction are dropped by
+// the notification handler; a short cooldown after each reaction absorbs a
+// palm contact the firmware reports as two gestures.
+func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, stop <-chan struct{}) {
+	const cooldown = time.Second
+	var lastEnd time.Time
 	for {
+		select {
+		case <-stop:
+			return
+		case ev := <-touches:
+			if time.Since(lastEnd) < cooldown {
+				continue
+			}
+			gesture := "stroke"
+			if time.Duration(ev.DurationMs)*time.Millisecond <= tapMax {
+				gesture = "tap"
+			}
+			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
+			reactToGesture(c, gesture)
+			lastEnd = time.Now()
+		}
+	}
+}
+
+// watchSessions logs device (re)connections and, when enabled, re-sends the
+// custom avatar set after each one: a loaded set lives in device RAM and is
+// gone after a reboot. A new connection is a new session_id (gateway ≥ 0.18
+// reports it, catching reconnects between polls) or a disconnected→connected
+// transition.
+func watchSessions(c *mcp.Client, avatar bool, stop <-chan struct{}) {
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	lastSession, wasConnected := "", false
+	for {
+		res, err := c.CallTool("get_status", map[string]any{})
+		if err == nil {
+			connected, session := parseStatus(res.Text())
+			isNew := connected && (!wasConnected || session != lastSession)
+			wasConnected, lastSession = connected, session
+			if isNew {
+				fmt.Fprintf(os.Stderr, "daemon: device connected (session %s)\n", session)
+				if avatar {
+					// Not under execMu: commands keep working during the upload.
+					// The firmware sometimes shows the new face but never sends
+					// its "loaded" reply, so a timeout here is not conclusive.
+					if text, err := loadAvatarQuiet(c); err != nil {
+						fmt.Fprintf(os.Stderr, "daemon: avatar load: %v\n", err)
+					} else {
+						fmt.Fprintf(os.Stderr, "daemon: avatar loaded %s\n", text)
+					}
+				}
+			}
+		}
 		select {
 		case <-stop:
 			return
 		case <-t.C:
 		}
-		res, err := c.CallTool("get_touch_state", map[string]any{})
-		if err != nil {
-			continue
-		}
-		var s struct {
-			Available bool `json:"available"`
-			Zone0     bool `json:"zone0"`
-			Zone1     bool `json:"zone1"`
-			Zone2     bool `json:"zone2"`
-			Raw       int  `json:"raw"`
-		}
-		if json.Unmarshal([]byte(res.Text()), &s) != nil || !s.Available {
-			continue
-		}
-		active := s.Raw > 0 || s.Zone0 || s.Zone1 || s.Zone2
-		now := time.Now()
+	}
+}
 
-		switch {
-		case active && touchStart.IsZero(): // rising edge
-			touchStart = now
-			reacted = false
-		case active && !reacted && now.Sub(touchStart) >= strokeHold: // long hold
-			if now.Sub(lastReact) >= cooldown {
-				lastReact = now
-				reacted = true
-				reactToGesture(c, "stroke")
+// waitPortsFree waits until every addr can be listened on, or the timeout
+// passes (then the gateway start reports the real error).
+func waitPortsFree(addrs []string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for _, a := range addrs {
+		for {
+			l, err := net.Listen("tcp", a)
+			if err == nil {
+				_ = l.Close()
+				break
 			}
-		case !active && !touchStart.IsZero(): // falling edge (release)
-			dur := now.Sub(touchStart)
-			touchStart = time.Time{}
-			if !reacted && now.Sub(lastReact) >= cooldown {
-				lastReact = now
-				if dur <= tapMax {
-					reactToGesture(c, "tap")
-				} else {
-					reactToGesture(c, "stroke")
-				}
+			if time.Now().After(deadline) {
+				return
 			}
-			reacted = false
+			fmt.Fprintf(os.Stderr, "daemon: waiting for port %s to be released...\n", a)
+			time.Sleep(time.Second)
 		}
 	}
+}
+
+// writeNotifyConfig (re)writes the daemon-owned ~/.stackchan/notify.yml that
+// enables the gateway's legacy_event channel ("stackchan/event"
+// notifications). Rewritten on every start so an edit cannot silently
+// disable touch reactions.
+func writeNotifyConfig() (string, error) {
+	path := filepath.Join(stackchanDir(), "notify.yml")
+	if err := os.MkdirAll(stackchanDir(), 0o755); err != nil {
+		return "", err
+	}
+	body := "# Owned by stackchan-cli daemon (rewritten on start): push touch events as MCP notifications.\nlegacy_event:\n  enabled: true\n"
+	return path, os.WriteFile(path, []byte(body), 0o644)
 }
 
 // reactionsDir holds per-gesture reaction scripts (<gesture>.txt). Set by cmdDaemon.

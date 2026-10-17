@@ -30,6 +30,16 @@ type Client struct {
 	mu      sync.Mutex
 	nextID  int
 	pending map[int]chan response
+	onNote  func(method string, params json.RawMessage)
+}
+
+// OnNotification registers a handler for server-initiated notifications
+// (e.g. the gateway's "stackchan/event" touch events). It runs on the read
+// loop, so it must not block or call back into the client.
+func (c *Client) OnNotification(fn func(method string, params json.RawMessage)) {
+	c.mu.Lock()
+	c.onNote = fn
+	c.mu.Unlock()
 }
 
 type request struct {
@@ -39,11 +49,15 @@ type request struct {
 	Params  any    `json:"params,omitempty"`
 }
 
+// response is any message from the gateway: a reply (ID set) or a
+// notification (ID nil, Method set).
 type response struct {
 	JSONRPC string          `json:"jsonrpc"`
 	ID      *int            `json:"id"`
 	Result  json.RawMessage `json:"result"`
 	Error   *rpcError       `json:"error"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params"`
 }
 
 type rpcError struct {
@@ -135,7 +149,13 @@ func (c *Client) readLoop(stdout io.Reader) {
 			continue // skip non-JSON / partial lines
 		}
 		if resp.ID == nil {
-			continue // server notification; ignored in one-shot mode
+			c.mu.Lock()
+			fn := c.onNote
+			c.mu.Unlock()
+			if fn != nil && resp.Method != "" {
+				fn(resp.Method, resp.Params)
+			}
+			continue
 		}
 		c.mu.Lock()
 		ch := c.pending[*resp.ID]

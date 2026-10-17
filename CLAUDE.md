@@ -390,8 +390,9 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   `stackchan-cli <cmd>` を即時転送（**~0.04s**、gateway 再起動・ポート競合なし）。
 - 出力配線: main.go に `var out io.Writer = os.Stdout`。結果 print を `out` 経由に。
   daemon は `withOutput(w, fn)`（`execMu` で直列化）で out を IPC conn / stderr に切替。
-- 転送: main() の one-shot 経路で `forwardToDaemon(os.Args[1:])` を試行→ daemon があれば送信、
+- 転送: main() の one-shot 経路で `sendToDaemon(os.Args[1:])` を試行→ daemon があれば送信、
   無ければ従来の自前 gateway 起動にフォールバック。`quoteArgs` で空白入り引数を再クォート。
+- **【旧方式・廃止】** 以下のポーリング方式は「2026-10-17 更新log」の通知方式に置き換え済み（`--touch-poll`・`touchWatch` は削除）。
 - タッチ検知: `get_touch_state` を `--touch-poll`(既定150ms) で監視。返り値
   `{zone0/1/2:bool, raw, last_event, last_event_age_ms}`。**ファームの tap/stroke ラベルは
   stroke に偏る**ので使わず、`raw>0||zone*` の**接触時間で自前分類**：release≤1s=tap /
@@ -423,6 +424,63 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 個人設定（この CLI 既定）: **既定話者 8=春日部つむぎ**（`gatewayEnv` が `STACKCHAN_VOICEVOX_DEFAULT_SPEAKER=8` 注入、
   env or `say --speaker N` で上書き）、**発話後に自動 `set_avatar embarrassed`**（`say --face <name>`/`--face ""` で変更/無効）。
 - 手順詳細: `docs/tts-voicevox.md`。話者一覧: `GET :50021/speakers`（ずんだもん3 / つむぎ8 / めたん2 等）。
+
+## 2026-10-17 更新log（firmware 1.17.0 / gateway 0.18.0・IP変更対応・VOICEVOX自動起動）
+
+> 本節が最新。上の「stage-3 daemon + タッチ反応log」のポーリング方式と運用注意（ポート解放待ち）、v1.8.0 前提の記述は本節で置き換え。
+
+### daemon の常駐方式（repo 外・この PC の設定）
+- タスクスケジューラ `StackchanDaemon`（ログオン時、失敗時 1 分間隔で 3 回再起動）が
+  `wscript.exe ~/.stackchan/start-daemon.vbs` を実行 → 画面なしで `stackchan-cli.exe daemon` を起動し、
+  出力を `~/.stackchan/daemon.log` に追記（各行に時刻付き）。
+- 停止/再起動: `Stop-ScheduledTask -TaskName StackchanDaemon` / `Start-ScheduledTask ...`。
+  バイナリ差し替えは停止 → `go build -o stackchan-cli.exe .` → 起動。
+- CLI は起動時に自分を Job オブジェクト（KILL_ON_JOB_CLOSE）に入れる。daemon を強制終了しても
+  gateway・Python・VOICEVOX は道連れで終了し、ポートは残らない（実測済み）。
+  daemon 起動時は 8765/8766 が空くまで最大 15 秒待つ（直前の gateway の解放待ち）。
+
+### PC の IP 変更でデバイスが繋がらなくなった件
+- 原因: PC の Wi-Fi IP が DHCP で変わり、デバイスの `websocket.url` が古い IP のまま。
+  ルーターで PC の新しい IP を予約済み（実値は `ENVIRONMENT.local.md`）。
+- **captive portal(192.168.4.1) は設定モード中しか開けない**。設定モードへは「起動中の表示の間に画面を
+  短くタップ」（起動後のタップは音声聞き取り）だが、実機ではうまく入れなかった。
+- **USB 経由で NVS の `websocket.url` だけ書き換えて解決**（Wi-Fi 設定は保持）:
+  `py scripts/nvs_set_ws_url.py --port COM3 --url ws://<PC-IP>:8765/`
+  （読み出し→バックアップ `~/.stackchan/nvs-backup/`→エントリと CRC 書き換え→`0x9000` へ書き戻し）。
+  NVS は `0x9000` から 16KB、文字列エントリのヘッダ CRC とデータ CRC は `zlib.crc32(x, 0xFFFFFFFF)`
+  で既存 23 エントリ全一致を確認済み。元より長い URL は in-place 不可。
+- firmware 1.11 以降はデバイス接続中なら `call gateway_config_set --json '{"url":"..."}'` で変更可（推奨）。
+- デバイスの LAN IP は DHCP。ping の待ち時間 0.5 秒の一斉検索では見つからず、2 秒にして ARP に出た。
+- USB ケーブル/ポートによっては給電のみで `VID_303A` が出ない。PC 直挿しで COM3 が出た。
+
+### firmware / gateway 更新（v1.8.0 → v1.17.0、gateway → 0.18.0）
+- firmware はアプリだけ更新: `0x20000` に `xiaozhi.bin`、`0x800000` に merged-binary から切り出した
+  assets（v1.8 と中身が違うため）。パーティション表は同一、otadata は ota_0 を指していた。NVS は保持。
+  バイナリは `firmware/v1.17.0/`（git 管理外）。
+- gateway: `uv tool install --force --python 3.12 "stackchan-mcp[tts]==0.18.0"`（`[tts]` に opuslib を含む。
+  `opus.dll` は従来どおり `~/.local/bin`）。
+- 新機能の使い方:
+  - **タッチ通知**: `legacy_event.enabled: true` の notify.yml を `STACKCHAN_NOTIFY_CONFIG` で渡すと、
+    gateway が `stackchan/event`（`event_type`/`subtype`/`duration_ms`）を stdio に通知する。
+    daemon はこれで反応（ポーリング廃止）。firmware の分類は 400ms 以上を stroke とするので、
+    daemon は `duration_ms` ≤ 1000ms を tap とし直す。
+  - **アバター**: build 時埋め込みは廃止され、`load_avatar_set`（layered = 14 枚 × 160×120 RGB565 LE、
+    537,600 バイト）で実行時に送る。デバイスの RAM にのみ保持 → daemon が新 session ごとに再送。
+    デバイスは gateway の `VISION_HOST:8766/avatar_set/<id>` を GET する。
+  - gateway 経由で呼べるのは対応表にあるツールのみ。`self.wifi.set_power_save` は直接呼べない。
+
+### 未解決: デバイスからの応答が遅い・届かない
+- ping は ~10ms だが、デバイス往復の MCP 呼び出し（`get_touch_state` 等）が 0.3〜10 秒、
+  ときに gateway の 10 秒タイムアウト（`Timeout waiting for ESP32 response`）。v1.8 でも v1.17 でも発生。
+- `load_avatar_set` は GET 完了・顔も表示されるのに、デバイスの `avatar_set_loaded` 返信が届かず
+  `device_timeout` になることがある（2 秒で `ok:true` が返る回もある）。発話直後の `set_avatar` も
+  タイムアウトしやすい。口パクより声が遅れる。
+- 次の手: USB シリアル（COM3）でデバイスログを見る / Wi-Fi 省電力（`WIFI_PS_MIN_MODEM` 既定）の影響確認。
+
+### VOICEVOX 自動起動
+- エンジンが応答しなければ CLI が `vv-engine\run.exe` をウィンドウ無しで起動（約 2〜4 秒で準備完了）。
+  daemon は起動時に立ち上げて保持。詳細は `docs/tts-voicevox.md`。
+- 本体の音量は既定で 100（最大）。gateway に音量倍率の設定は無い。
 
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`

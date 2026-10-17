@@ -93,6 +93,8 @@ func dispatch(cmd string, args []string, c *mcp.Client) error {
 		return cmdMoveHead(args, c)
 	case "avatar":
 		return cmdAvatar(args, c)
+	case "avatar-load":
+		return cmdAvatarLoad(args, c)
 	case "mouth":
 		return cmdMouth(args, c)
 	case "blink":
@@ -135,6 +137,8 @@ Commands:
   wait [--timeout N]     Keep the gateway up and wait for the device to connect
   move-head --yaw N --pitch N
   avatar <face>          idle|happy|thinking|sad|surprised|embarrassed|off
+  avatar-load            upload ~/.stackchan/avatar/*.png as the face set (lost on device reboot;
+                         the daemon re-sends it automatically)
   mouth <shape>          closed|half|open|e|u
   blink <on|off>
   led --index N --r N --g N --b N
@@ -165,9 +169,10 @@ up to 90s for the StackChan to reconnect. Use 'daemon' or 'repl' for snappy cont
 // ---- shared plumbing -------------------------------------------------------
 
 // withClient boots a gateway, initializes the session, runs fn, then shuts down.
-func withClient(verbose bool, fn func(*mcp.Client) error) error {
+// extraEnv is appended to the gateway's environment.
+func withClient(verbose bool, fn func(*mcp.Client) error, extraEnv ...string) error {
 	exe := gatewayPath()
-	env := gatewayEnv()
+	env := append(gatewayEnv(), extraEnv...)
 
 	var stderr io.Writer
 	if verbose {
@@ -193,6 +198,21 @@ func withClientOrReuse(verbose bool, c *mcp.Client, fn func(*mcp.Client) error) 
 		return fn(c)
 	}
 	return withClient(verbose, fn)
+}
+
+// withDevice is withClientOrReuse for commands that need the StackChan: a
+// freshly started one-shot gateway first waits for the device to reconnect
+// (a resident client is already connected).
+func withDevice(verbose bool, c *mcp.Client, fn func(*mcp.Client) error) error {
+	oneShot := c == nil
+	return withClientOrReuse(verbose, c, func(c *mcp.Client) error {
+		if oneShot {
+			if err := waitForDevice(c); err != nil {
+				return err
+			}
+		}
+		return fn(c)
+	})
 }
 
 func gatewayPath() string {
@@ -249,16 +269,14 @@ func localLANIP() string {
 // the StackChan reconnects. In REPL mode (outer != nil) it reuses the resident
 // client and skips the wait, since the device stays connected between commands.
 func callAndPrint(verbose, waitDevice bool, tool string, args map[string]any, outer *mcp.Client) error {
-	oneShot := outer == nil
-	return withClientOrReuse(verbose, outer, func(c *mcp.Client) error {
-		if waitDevice && oneShot {
-			if err := waitForDevice(c); err != nil {
-				return err
-			}
-		}
+	run := func(c *mcp.Client) error {
 		_, err := callTool(c, tool, args)
 		return err
-	})
+	}
+	if waitDevice {
+		return withDevice(verbose, outer, run)
+	}
+	return withClientOrReuse(verbose, outer, run)
 }
 
 // waitForDevice blocks a one-shot command until the freshly started gateway
@@ -270,8 +288,9 @@ func waitForDevice(c *mcp.Client) error {
 
 // longToolTimeouts lists tools that block longer than the client default.
 var longToolTimeouts = map[string]time.Duration{
-	"say":        5 * time.Minute, // blocks until playback ends
-	"take_photo": 60 * time.Second,
+	"say":             5 * time.Minute, // blocks until playback ends
+	"take_photo":      60 * time.Second,
+	"load_avatar_set": (avatarLoadTimeout + 10) * time.Second,
 }
 
 // callTool runs one tool, prints its text result to out, and returns an error
@@ -283,9 +302,20 @@ func callTool(c *mcp.Client, tool string, args map[string]any) (mcp.ToolResult, 
 	}
 	fmt.Fprintln(out, res.Text())
 	if res.IsError {
-		return res, fmt.Errorf("tool %s failed", tool)
+		return res, fmt.Errorf("tool %s failed", tool) // details already printed
 	}
 	return res, nil
+}
+
+// callToolQuiet is callTool without printing (the result text goes into the
+// error instead), for background work that must not write to the shared out,
+// e.g. the daemon's avatar upload.
+func callToolQuiet(c *mcp.Client, tool string, args map[string]any) (mcp.ToolResult, error) {
+	res, err := c.CallToolTimeout(tool, args, longToolTimeouts[tool])
+	if err == nil && res.IsError {
+		err = fmt.Errorf("tool %s failed: %s", tool, res.Text())
+	}
+	return res, err
 }
 
 // waitConnected polls get_status until the device reports connected:true.
@@ -307,7 +337,20 @@ func waitConnected(c *mcp.Client, timeout time.Duration) error {
 }
 
 func isConnected(statusText string) bool {
-	return strings.Contains(strings.ReplaceAll(statusText, " ", ""), "\"connected\":true")
+	connected, _ := parseStatus(statusText)
+	return connected
+}
+
+// parseStatus reads the gateway's get_status result.
+func parseStatus(statusText string) (connected bool, sessionID string) {
+	var s struct {
+		Connected bool   `json:"connected"`
+		SessionID string `json:"session_id"`
+	}
+	if json.Unmarshal([]byte(statusText), &s) != nil {
+		return false, ""
+	}
+	return s.Connected, s.SessionID
 }
 
 // fs builds a FlagSet with a shared --verbose flag. ContinueOnError keeps a bad
@@ -522,13 +565,7 @@ func cmdSay(args []string, c *mcp.Client) error {
 	// Start the engine while a one-shot gateway waits for the device.
 	engineReady := make(chan error, 1)
 	go func() { engineReady <- ensureVoicevox() }()
-	oneShot := c == nil
-	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
-		if oneShot {
-			if err := waitForDevice(c); err != nil {
-				return err
-			}
-		}
+	return withDevice(*verbose, c, func(c *mcp.Client) error {
 		if err := <-engineReady; err != nil {
 			fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 		}
@@ -538,11 +575,7 @@ func cmdSay(args []string, c *mcp.Client) error {
 		// say() blocks until playback finishes, so the mouth has stopped by now;
 		// settle on a resting face.
 		if *face != "" {
-			res, err := c.CallTool("set_avatar", map[string]any{"face": *face})
-			if err == nil && res.IsError {
-				err = fmt.Errorf("%s", res.Text())
-			}
-			if err != nil {
+			if _, err := callToolQuiet(c, "set_avatar", map[string]any{"face": *face}); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: set_avatar %s failed: %v\n", *face, err)
 			}
 		}
@@ -557,13 +590,7 @@ func cmdPhoto(args []string, c *mcp.Client) error {
 	if err := set.Parse(args); err != nil {
 		return err
 	}
-	oneShot := c == nil
-	return withClientOrReuse(*verbose, c, func(c *mcp.Client) error {
-		if oneShot {
-			if err := waitForDevice(c); err != nil {
-				return err
-			}
-		}
+	return withDevice(*verbose, c, func(c *mcp.Client) error {
 		res, err := callTool(c, "take_photo", map[string]any{"question": *question})
 		if err != nil {
 			return err
@@ -838,10 +865,7 @@ func cmdSource(args []string) error {
 		return fmt.Errorf("source requires a file")
 	}
 	file := set.Arg(0)
-	return withClient(*verbose, func(c *mcp.Client) error {
-		if err := waitForDevice(c); err != nil {
-			return err
-		}
+	return withDevice(*verbose, nil, func(c *mcp.Client) error {
 		return doSource([]string{file}, c)
 	})
 }
@@ -859,6 +883,7 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("tools"),
 		readline.PcItem("wait"),
 		readline.PcItem("avatar", faces...),
+		readline.PcItem("avatar-load"),
 		readline.PcItem("mouth", pcItems("closed", "half", "open", "e", "u")...),
 		readline.PcItem("blink", readline.PcItem("on"), readline.PcItem("off")),
 		readline.PcItem("move-head", readline.PcItem("--yaw"), readline.PcItem("--pitch")),
@@ -892,6 +917,7 @@ func replHelp() {
   status                         connection status
   tools                          list gateway tools
   avatar <face>                  idle|happy|thinking|sad|surprised|embarrassed|off
+  avatar-load                    upload ~/.stackchan/avatar/*.png as the face set
   mouth <shape>                  closed|half|open|e|u
   blink <on|off>
   move-head --yaw N --pitch N    yaw -90..90, pitch 5..85
