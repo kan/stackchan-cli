@@ -134,18 +134,16 @@ func serveDaemon(c *mcp.Client, ln net.Listener, opts daemonOptions) error {
 	// commands (e.g. status) never hang while the device is away.
 	go watchSessions(c, opts.avatar, stop)
 	if opts.touch {
-		// Unbuffered: a touch is handed over only while the reactor is idle,
-		// so touches during a reaction are dropped instead of queued.
-		touches := make(chan touchEvent)
+		// One-slot queue: a touch during a reaction waits and is answered right
+		// after it; a newer touch replaces an older waiting one.
+		touches := make(chan touchEvent, 1)
 		c.OnNotification(func(method string, params json.RawMessage) {
 			var ev touchEvent
 			if method != "stackchan/event" || json.Unmarshal(params, &ev) != nil || ev.EventType != "touch" {
 				return
 			}
-			select { // never block the read loop
-			case touches <- ev:
-			default:
-			}
+			ev.at = time.Now()
+			queueLatest(touches, ev)
 		})
 		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, stop)
 	}
@@ -231,31 +229,53 @@ type touchEvent struct {
 	EventType  string `json:"event_type"`
 	Subtype    string `json:"subtype"`
 	DurationMs int    `json:"duration_ms"`
+	at         time.Time
+}
+
+// queueLatest puts ev in the one-slot queue without blocking the MCP read
+// loop, replacing a touch that is still waiting there. The read loop is the
+// only producer, so after draining the slot the send always succeeds.
+func queueLatest(q chan touchEvent, ev touchEvent) {
+	select {
+	case old := <-q:
+		// Log off the read loop: a stalled stderr relay must not block it.
+		go fmt.Fprintf(os.Stderr, "daemon: touch replaced by a newer one while reacting: %s %dms\n", old.Subtype, old.DurationMs)
+	default:
+	}
+	q <- ev
 }
 
 // reactToTouches classifies each touch by contact duration (the firmware's
 // own label calls anything ≥ 400 ms a stroke, which is too eager) and runs
-// the matching reaction. Touches arriving during a reaction are dropped by
-// the notification handler; a short cooldown after each reaction absorbs a
-// palm contact the firmware reports as two gestures.
+// the matching reaction. A touch made during a reaction is answered after it,
+// unless it came within a second of the touch being answered (one palm
+// contact reported as two gestures) or has waited so long the moment passed.
 func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, stop <-chan struct{}) {
-	const cooldown = time.Second
-	var lastEnd time.Time
+	const (
+		duplicateWindow = time.Second
+		maxWait         = 10 * time.Second
+	)
+	var lastAnswered time.Time // arrival time of the last touch we reacted to
 	for {
 		select {
 		case <-stop:
 			return
 		case ev := <-touches:
-			if time.Since(lastEnd) < cooldown {
+			if ev.at.Sub(lastAnswered) < duplicateWindow {
+				fmt.Fprintf(os.Stderr, "daemon: touch ignored (same contact as the previous one): %s %dms\n", ev.Subtype, ev.DurationMs)
 				continue
 			}
+			if waited := time.Since(ev.at); waited > maxWait {
+				fmt.Fprintf(os.Stderr, "daemon: touch ignored (waited %s during a reaction): %s %dms\n", waited.Round(time.Second), ev.Subtype, ev.DurationMs)
+				continue
+			}
+			lastAnswered = ev.at
 			gesture := "stroke"
 			if time.Duration(ev.DurationMs)*time.Millisecond <= tapMax {
 				gesture = "tap"
 			}
 			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
 			reactToGesture(c, gesture)
-			lastEnd = time.Now()
 		}
 	}
 }
