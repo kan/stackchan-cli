@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,21 +23,13 @@ import (
 	"stackchan-cli/internal/mcp"
 )
 
+// IPC commands and touch reactions run concurrently, each with its own output
+// (cmdEnv), so a long command (listen, say) never holds up the others. The
+// device still handles the resulting tool calls one at a time, so a command
+// sent during a reaction may land between its steps. Reactions never overlap
+// each other: reactToTouches runs them one by one.
+
 const ipcAddr = "127.0.0.1:8770"
-
-// execMu serializes command execution so the shared `out` writer is never
-// driven by two jobs at once (a touch reaction vs a forwarded IPC command).
-var execMu sync.Mutex
-
-// withOutput runs fn with command result output routed to w, serialized.
-func withOutput(w io.Writer, fn func()) {
-	execMu.Lock()
-	defer execMu.Unlock()
-	prevOut, prevErr := out, errOut
-	out, errOut = w, w
-	defer func() { out, errOut = prevOut, prevErr }()
-	fn()
-}
 
 func cmdDaemon(args []string) error {
 	set, verbose := fs("daemon")
@@ -172,15 +165,55 @@ func handleConn(conn net.Conn, c *mcp.Client) {
 		return
 	}
 	line = strings.TrimRight(line, "\r\n")
-	withOutput(conn, func() {
-		_, err := runLine(line, c)
-		writeIPCStatus(conn, err)
-	})
+	errW := &stderrLines{w: conn}
+	_, err = runLine(line, cmdEnv{c: c, out: conn, errOut: errW})
+	errW.endLine()
+	writeIPCStatus(conn, err)
 }
 
 // ipcStatusPrefix marks the last line of a daemon reply, which carries the
 // command's outcome ("ok" or "error <msg>") so the client can set its exit code.
 const ipcStatusPrefix = "\x1estackchan-ipc:"
+
+// ipcStderrPrefix marks a reply line the client writes to its stderr (notes,
+// warnings, script errors), as one-shot mode does.
+const ipcStderrPrefix = "\x1estackchan-ipc-stderr:"
+
+// stderrLines puts ipcStderrPrefix in front of every line written to w.
+type stderrLines struct {
+	w   io.Writer
+	mid bool // the last write ended inside a line
+}
+
+func (s *stderrLines) Write(p []byte) (int, error) {
+	buf := make([]byte, 0, len(p)+len(ipcStderrPrefix))
+	for rest := p; len(rest) > 0; {
+		if !s.mid {
+			buf = append(buf, ipcStderrPrefix...)
+		}
+		i := bytes.IndexByte(rest, '\n')
+		if i < 0 {
+			buf = append(buf, rest...)
+			s.mid = true
+			break
+		}
+		buf = append(buf, rest[:i+1]...)
+		rest = rest[i+1:]
+		s.mid = false
+	}
+	if _, err := s.w.Write(buf); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+// endLine finishes an unterminated line, so the status line starts a line.
+func (s *stderrLines) endLine() {
+	if s.mid {
+		_, _ = s.w.Write([]byte("\n"))
+		s.mid = false
+	}
+}
 
 // writeIPCStatus writes the status line that ends a daemon reply.
 func writeIPCStatus(w io.Writer, err error) {
@@ -319,7 +352,6 @@ func watchSessions(c *mcp.Client, avatar bool, stop <-chan struct{}) {
 			if isNew {
 				fmt.Fprintf(os.Stderr, "daemon: device connected (session %s)\n", session)
 				if avatar {
-					// Not under execMu: commands keep working during the upload.
 					// The firmware sometimes shows the new face but never sends
 					// its "loaded" reply, so a timeout here is not conclusive.
 					if text, err := loadAvatarQuiet(c); err != nil {
@@ -375,7 +407,7 @@ func writeNotifyConfig() (string, error) {
 var reactionsDir string
 
 // defaultReactions seed the reaction-script files on first run so they can be
-// edited without rebuilding. They mirror the built-in fallback behavior.
+// edited without rebuilding. A gesture whose file is missing runs these too.
 var defaultReactions = map[string]string{
 	"tap": `# Reaction for a quick tap. Any REPL commands work (avatar/mouth/led/say/sleep...).
 all-leds --r 80 --g 180 --b 255
@@ -406,26 +438,18 @@ func seedReactions(dir string) {
 // to the daemon log (stderr) so it doesn't tangle with forwarded-command output.
 func reactToGesture(c *mcp.Client, gesture string) {
 	fmt.Fprintf(os.Stderr, "daemon: touch %q -> reacting\n", gesture)
+	e := cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr}
 	if reactionsDir != "" {
 		if file := filepath.Join(reactionsDir, gesture+".txt"); fileExists(file) {
-			withOutput(os.Stderr, func() { _ = doSource([]string{file}, c) })
+			_ = doSource([]string{file}, e)
 			return
 		}
 	}
-	withOutput(os.Stderr, func() {
-		switch gesture {
-		case "stroke":
-			_, _ = runLine("all-leds --r 255 --g 120 --b 160", c)
-			_, _ = runLine(`say --face embarrassed "えへへ、なでられるの好き。"`, c)
-			_, _ = runLine("clear-leds", c)
-		case "tap":
-			_, _ = runLine("all-leds --r 80 --g 180 --b 255", c)
-			_, _ = runLine(`say --face happy "わっ、なあに？"`, c)
-			_, _ = runLine("clear-leds", c)
-		default:
-			_, _ = runLine("avatar happy", c)
-		}
-	})
+	script, ok := defaultReactions[gesture]
+	if !ok {
+		script = "avatar happy"
+	}
+	runScript(script, e)
 }
 
 func fileExists(p string) bool {
@@ -448,11 +472,12 @@ func daemonAvailable() bool {
 // caller can fall back to running the command itself; err is the command's
 // failure as reported by the daemon (or a broken connection).
 func sendToDaemon(argv []string) (forwarded bool, err error) {
-	return forwardTo(ipcAddr, argv, os.Stdout)
+	return forwardTo(ipcAddr, argv, os.Stdout, os.Stderr)
 }
 
-// forwardTo is sendToDaemon for a daemon on addr, writing the reply to w.
-func forwardTo(addr string, argv []string, w io.Writer) (forwarded bool, err error) {
+// forwardTo is sendToDaemon for a daemon on addr, writing the reply to
+// stdout and stderr.
+func forwardTo(addr string, argv []string, stdout, stderr io.Writer) (forwarded bool, err error) {
 	conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
 	if err != nil {
 		return false, nil
@@ -474,7 +499,11 @@ func forwardTo(addr string, argv []string, w io.Writer) (forwarded bool, err err
 			}
 			return true, nil
 		}
-		fmt.Fprintln(w, line)
+		if msg, ok := strings.CutPrefix(line, ipcStderrPrefix); ok {
+			fmt.Fprintln(stderr, msg)
+			continue
+		}
+		fmt.Fprintln(stdout, line)
 	}
 	if err := sc.Err(); err != nil {
 		return true, err

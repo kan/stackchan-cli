@@ -111,23 +111,23 @@ func withAvatarPayload(upload func(args map[string]any) error) error {
 	return upload(map[string]any{"archive_path": path, "mode": "layered", "timeout": avatarLoadTimeout})
 }
 
-// loadAvatarQuiet uploads the avatar set without writing to `out`, so the
-// daemon can run it without holding execMu (an upload can take minutes).
+// loadAvatarQuiet uploads the avatar set and returns the result text instead
+// of printing it, for the daemon to log.
 func loadAvatarQuiet(c *mcp.Client) (text string, err error) {
 	err = withAvatarPayload(func(args map[string]any) error {
-		res, err := callToolQuiet(c, "load_avatar_set", args)
+		res, err := callTool(c, "load_avatar_set", args, nil)
 		text = res.Text()
 		return err
 	})
 	return text, err
 }
 
-func cmdAvatarLoad(args []string, c *mcp.Client) error {
+func cmdAvatarLoad(args []string, e cmdEnv) error {
 	set, verbose := fs("avatar-load")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 	return withAvatarPayload(func(toolArgs map[string]any) error {
-		return callAndPrint(*verbose, true, "load_avatar_set", toolArgs, c)
+		return callAndPrint(*verbose, true, "load_avatar_set", toolArgs, e)
 	})
 }

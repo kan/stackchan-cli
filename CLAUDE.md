@@ -389,8 +389,9 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 ## stage-3 daemon + タッチ反応log（2026-06-02・成功）
 - `daemon.go`: gateway を常駐保持し ①頭部タッチに自動反応 ②`127.0.0.1:8770` の TCP IPC で
   `stackchan-cli <cmd>` を即時転送（**~0.04s**、gateway 再起動・ポート競合なし）。
-- 出力配線: main.go に `var out io.Writer = os.Stdout`。結果 print を `out` 経由に。
+- **【旧方式・廃止】** 出力配線: main.go に `var out io.Writer = os.Stdout`。結果 print を `out` 経由に。
   daemon は `withOutput(w, fn)`（`execMu` で直列化）で out を IPC conn / stderr に切替。
+  → 「2026-10-17 更新log」の「daemon のコマンドの並行実行（#1）」で `cmdEnv` 方式に置き換え済み。
 - 転送: main() の one-shot 経路で `sendToDaemon(os.Args[1:])` を試行→ daemon があれば送信、
   無ければ従来の自前 gateway 起動にフォールバック。`quoteArgs` で空白入り引数を再クォート。
 - **【旧方式・廃止】** 以下のポーリング方式は「2026-10-17 更新log」の通知方式に置き換え済み（`--touch-poll`・`touchWatch` は削除）。
@@ -429,14 +430,19 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 
 ## 2026-10-17 更新log（firmware 1.17.0 / gateway 0.18.0・IP変更対応・VOICEVOX自動起動）
 
-> 本節が最新。上の「stage-3 daemon + タッチ反応log」のポーリング方式と運用注意（ポート解放待ち）、v1.8.0 前提の記述は本節で置き換え。
+> 本節が最新。上の「stage-3 daemon + タッチ反応log」のポーリング方式、出力配線（`execMu` での直列化）、運用注意（ポート解放待ち）、v1.8.0 前提の記述は本節で置き換え。
 
 ### daemon の常駐方式（repo 外・この PC の設定）
 - タスクスケジューラ `StackchanDaemon`（ログオン時、失敗時 1 分間隔で 3 回再起動）が
   `wscript.exe ~/.stackchan/start-daemon.vbs` を実行 → 画面なしで `stackchan-cli.exe daemon` を起動し、
   出力を `~/.stackchan/daemon.log` に追記（各行に時刻付き）。
-- 停止/再起動: `Stop-ScheduledTask -TaskName StackchanDaemon` / `Start-ScheduledTask ...`。
-  バイナリ差し替えは停止 → `go build -o stackchan-cli.exe .` → 起動。
+- 停止: **`Stop-ScheduledTask` では daemon が止まらない**（タスクが終わっても `stackchan-cli.exe daemon` は
+  残る。実測）。one-shot や REPL のプロセスも同じ名前なので、コマンドラインで daemon を見分ける:
+  `Get-CimInstance Win32_Process -Filter "Name='stackchan-cli.exe'" | Select ProcessId,CommandLine`。
+  末尾が `daemon` のプロセスを `Stop-Process -Id <PID>` で止める。
+  起動: `Start-ScheduledTask -TaskName StackchanDaemon`。daemon が残ったまま起動すると、新しい daemon は
+  「already running」で終了し、古いバイナリが動き続ける。
+  バイナリ差し替えは停止 → `go build -o stackchan-cli.exe .` → 起動 → daemon.log で起動時刻を確認。
 - CLI は起動時に自分を Job オブジェクト（KILL_ON_JOB_CLOSE）に入れる。daemon を強制終了しても
   gateway・Python・VOICEVOX は道連れで終了し、ポートは残らない（実測済み）。
   daemon 起動時は 8765/8766 が空くまで最大 15 秒待つ（直前の gateway の解放待ち）。
@@ -509,6 +515,19 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - エンジンが応答しなければ CLI が `vv-engine\run.exe` をウィンドウ無しで起動（約 2〜4 秒で準備完了）。
   daemon は起動時に立ち上げて保持。詳細は `docs/tts-voicevox.md`。
 - 本体の音量は既定で 100（最大）。gateway に音量倍率の設定は無い。
+
+### daemon のコマンドの並行実行（#1）
+- IPC のコマンドとタッチの反応は互いを待たずに並行で動く。出力先はコマンドごとの `cmdEnv`
+  （client と `out` / `errOut`）で渡す。グローバルの `out` / `errOut` / `withOutput` / `execMu` は削除済み。
+  **出力先をグローバル変数に戻さない**（並行実行で出力が混ざる）。
+- 反応の途中に IPC のコマンドが割り込むのは許す（ユーザー決定）。反応どうしは `reactToTouches` の
+  1 本のループで順に実行し、重ならない。デバイスは命令を届いた順に処理する。
+- 例外: スピーカーとマイクを使う `say` / `listen` のツール呼び出しだけは `audioMu` で 1 つずつ実行する
+  （聞き取り中の発話が録音される、2 つの発話の音声が混ざるのを防ぐ）。
+- IPC の応答で `errOut` に書いた行は `ipcStderrPrefix` 付きで送り、クライアントは stderr に書く
+  （one-shot と同じ出し分け）。
+- 実測: `listen --sec 10`（計 13.4 秒）の最中に `status` / `avatar` が 0.03〜0.12 秒で返った。
+  `listen` 中の `say` は `listen` の終了を待ってから話した。
 
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`
