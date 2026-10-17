@@ -27,7 +27,8 @@ The following are in scope:
 
 - Command injection or argument injection through the CLI, the REPL, script files
   (`source`), or the daemon's command forwarding
-- Unintended exposure of the daemon IPC (`127.0.0.1:8770`) beyond the local host
+- Unintended exposure of the daemon IPC (`127.0.0.1:8770`) or the voice command hook
+  (`127.0.0.1:8771`) beyond the local host
 - Path traversal or unintended file writes (captures, avatar payloads, logs, NVS backups)
 - `scripts/nvs_set_ws_url.py` writing anything other than the intended NVS entry to the device
 - Child processes (gateway, VOICEVOX engine) launched from an unexpected path
@@ -35,9 +36,12 @@ The following are in scope:
 Known design limitations (not vulnerabilities on their own):
 
 - The daemon IPC has no authentication; any process of any local user can send it commands.
+  The voice command hook is the same: any local process can post audio, and the daemon runs the
+  rules in `~/.stackchan/voice-commands.txt` that match its transcription.
 - With `STACKCHAN_TOKEN` unset, the gateway's device port (`:8765`) accepts any client on the LAN.
   Set a token on both the gateway and the firmware if your network is not trusted.
-- Audio captured by `listen` is transcribed locally, but the device sends it over the LAN unencrypted.
+- Audio captured by `listen` or a screen tap is transcribed locally, but the device sends it over
+  the LAN unencrypted.
 
 Out of scope:
 

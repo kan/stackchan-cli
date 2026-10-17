@@ -35,6 +35,9 @@ type cmdEnv struct {
 	c      *mcp.Client // nil in one-shot mode: the command spawns a gateway
 	out    io.Writer   // command results
 	errOut io.Writer   // notes, warnings and per-line script errors
+	// inVoice is set while voice rules run, so a rule cannot call voice
+	// again (it could recurse until the daemon crashes).
+	inVoice bool
 }
 
 // stdEnv writes to the terminal (one-shot and REPL).
@@ -119,6 +122,8 @@ func dispatch(cmd string, args []string, e cmdEnv) error {
 		return cmdSay(args, e)
 	case "listen":
 		return cmdListen(args, e)
+	case "voice":
+		return cmdVoice(args, e)
 	case "photo":
 		return cmdPhoto(args, e)
 	case "call":
@@ -158,6 +163,9 @@ Commands:
   listen [--sec N] [--lang ja] [--model M] [--motion none|face-only|look-up]
                          record from the device mic and print the transcription
                          (needs the gateway's stt-faster-whisper extra)
+  voice [text]           run ~/.stackchan/voice-commands.txt on text as if it were heard;
+                         without text, list the rules
+                         (the daemon runs them on speech: tap the screen, speak, tap again)
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
 
@@ -238,6 +246,11 @@ func gatewayPath() string {
 	return filepath.Join(home, ".local", "bin", "stackchan-mcp.exe")
 }
 
+// defaultWhisperModel is the speech recognition model for listen and voice
+// commands: the gateway's default "base" misheard "スタックチャン" as
+// "スタッフちゃん"; "small" got it right (~4s on CPU).
+const defaultWhisperModel = "small"
+
 func gatewayEnv() []string {
 	env := os.Environ()
 	if os.Getenv("STACKCHAN_TOKEN") == "" {
@@ -257,10 +270,8 @@ func gatewayEnv() []string {
 	if os.Getenv("STACKCHAN_VOICEVOX_DEFAULT_SPEAKER") == "" {
 		env = append(env, "STACKCHAN_VOICEVOX_DEFAULT_SPEAKER=8")
 	}
-	// Speech recognition: the gateway's default "base" model misheard
-	// "スタックチャン" as "スタッフちゃん"; "small" got it right (~4s on CPU).
 	if os.Getenv("STACKCHAN_FASTER_WHISPER_MODEL") == "" {
-		env = append(env, "STACKCHAN_FASTER_WHISPER_MODEL=small")
+		env = append(env, "STACKCHAN_FASTER_WHISPER_MODEL="+defaultWhisperModel)
 	}
 	return env
 }
@@ -964,6 +975,7 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("brightness"),
 		readline.PcItem("say", readline.PcItem("--speaker"), readline.PcItem("--face")),
 		readline.PcItem("listen", readline.PcItem("--sec"), readline.PcItem("--lang"), readline.PcItem("--model"), readline.PcItem("--motion")),
+		readline.PcItem("voice"),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
 		readline.PcItem("sleep"),
@@ -997,6 +1009,7 @@ func replHelp(w io.Writer) {
   volume <0-100>  |  brightness <0-100>
   say [--speaker N] <text>       speak via VOICEVOX (3=ずんだもん, 8=春日部つむぎ)
   listen [--sec N]               record from the device mic and print the transcription
+  voice [text]                   run the voice command rules on text (no text: list them)
   photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
   sleep <ms>                     pause (for choreography)

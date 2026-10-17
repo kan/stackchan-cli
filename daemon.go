@@ -37,6 +37,7 @@ func cmdDaemon(args []string) error {
 	set.BoolVar(&opts.touch, "touch", true, "react to head touch events")
 	set.IntVar(&opts.tapMaxMs, "tap-max", 1000, "touches up to this many ms are a tap; longer ones a stroke")
 	set.BoolVar(&opts.avatar, "avatar", true, "send ~/.stackchan/avatar/*.png to the device on every (re)connect")
+	set.BoolVar(&opts.voice, "voice", true, "run ~/.stackchan/voice-commands.txt on speech after a screen tap")
 	set.StringVar(&opts.reactions, "reactions", filepath.Join(stackchanDir(), "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
 	if err := set.Parse(args); err != nil {
 		return err
@@ -61,6 +62,7 @@ type daemonOptions struct {
 	touch     bool
 	tapMaxMs  int
 	avatar    bool
+	voice     bool
 	reactions string
 }
 
@@ -95,6 +97,21 @@ func runDaemon(opts daemonOptions) error {
 	}
 	defer ln.Close()
 
+	// Voice commands: have the gateway POST screen-tap speech to us.
+	var voiceLn net.Listener
+	if opts.voice {
+		if user := os.Getenv("STACKCHAN_AUDIO_HOOK_URL"); user != "" {
+			fmt.Fprintf(os.Stderr, "daemon: STACKCHAN_AUDIO_HOOK_URL=%s is set; voice commands are off\n", user)
+		} else if voiceLn, err = net.Listen("tcp", voiceHookAddr); err != nil {
+			fmt.Fprintf(os.Stderr, "daemon: voice commands are off: %v\n", err)
+			voiceLn = nil
+		} else {
+			defer voiceLn.Close()
+			seedFile(voiceCommandsPath(), defaultVoiceCommands)
+			gatewayEnv = append(gatewayEnv, "STACKCHAN_AUDIO_HOOK_URL=http://"+voiceHookAddr+"/voice")
+		}
+	}
+
 	// Warm up VOICEVOX in the background so the first reaction can speak.
 	go func() {
 		if err := ensureVoicevox(); err != nil {
@@ -103,11 +120,12 @@ func runDaemon(opts daemonOptions) error {
 	}()
 
 	return withClient(opts.verbose, func(c *mcp.Client) error {
-		return serveDaemon(c, ln, opts)
+		return serveDaemon(c, ln, voiceLn, opts)
 	}, gatewayEnv...)
 }
 
-func serveDaemon(c *mcp.Client, ln net.Listener, opts daemonOptions) error {
+// serveDaemon serves IPC on ln and, when voiceLn is set, voice commands on it.
+func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) error {
 	fmt.Fprintln(os.Stderr, "daemon: gateway up; waiting for device...")
 	fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch %v (tap ≤ %dms) · reactions %s · Ctrl-C to stop\n", ipcAddr, opts.touch, opts.tapMaxMs, reactionsDir)
 
@@ -139,6 +157,10 @@ func serveDaemon(c *mcp.Client, ln net.Listener, opts daemonOptions) error {
 			queueLatest(touches, ev)
 		})
 		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, stop)
+	}
+	if voiceLn != nil {
+		fmt.Fprintf(os.Stderr, "daemon: voice commands on (rules %s)\n", voiceCommandsPath())
+		go serveVoice(voiceLn, newVoiceHook(c), stop)
 	}
 
 	for {
@@ -422,14 +444,18 @@ clear-leds
 }
 
 func seedReactions(dir string) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	for gesture, body := range defaultReactions {
+		seedFile(filepath.Join(dir, gesture+".txt"), body)
+	}
+}
+
+// seedFile writes body to path unless the file exists, so it can be edited.
+func seedFile(path, body string) {
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		return
 	}
-	for gesture, body := range defaultReactions {
-		p := filepath.Join(dir, gesture+".txt")
-		if _, err := os.Stat(p); os.IsNotExist(err) {
-			_ = os.WriteFile(p, []byte(body), 0o644)
-		}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
+		_ = os.WriteFile(path, []byte(body), 0o644)
 	}
 }
 

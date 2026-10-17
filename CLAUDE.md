@@ -529,6 +529,24 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 実測: `listen --sec 10`（計 13.4 秒）の最中に `status` / `avatar` が 0.03〜0.12 秒で返った。
   `listen` 中の `say` は `listen` の終了を待ってから話した。
 
+### 音声コマンド（#4）
+- きっかけは本体の画面タップ（ユーザー決定）。firmware は画面タップで聞き取りを始め、もう一度のタップで
+  音声を送る。gateway 0.18.0 はこの「本体側で始まった聞き取り」の音声を、`STACKCHAN_AUDIO_HOOK_URL` が
+  設定されていれば Ogg/Opus で POST する（`audio_input_hook.py`）。設定が無ければ捨てる。文字起こしはしない。
+- daemon が `127.0.0.1:8771/voice` で受け、gateway の Python で faster-whisper を実行して文字にする。
+  Python は `%APPDATA%\uv\tools\stackchan-mcp\Scripts\python.exe` で、`STACKCHAN_STT_PYTHON` で上書きできる。
+  設定は gateway の `listen` と同じ（`small`、CPU、int8、beam_size=1）。モデルの読み込み約 1.5 秒＋文字起こし約 2 秒。
+- 照合のルールは `~/.stackchan/voice-commands.txt`（1 行 1 ルール、上ほど優先、`*` は当たらなかったとき）。
+  照合の前に、全角カタカナはひらがな、全角英数は半角、大文字は小文字にそろえ、記号と空白は除く。
+  呼びかけの言葉（「スタックチャン」）は必須にしない（ユーザー決定。聞き取りが不安定なため）。
+- 文字起こしの間は thinking の顔にし、終わったら idle に戻してからルールを実行する（ユーザー要望）。
+  既定の `*` ルールは悲しい顔で謝ったあと、2 秒で idle に戻す。
+- `stackchan-cli voice "<文>"` で、話さずにルールを試せる。文なしの `stackchan-cli voice` はルールの一覧を表示する。
+- 文字起こしは 60 秒で打ち切る（Python が固まると、以後の音声コマンドが受け付けられなくなるため）。
+  文字起こしに失敗したときも `*` ルールを実行し、失敗が本体の反応で分かるようにする。
+- ルールの中で `voice` は使えない（`cmdEnv.inVoice`。呼び合いが続くと daemon ごと落ちるため）。
+- 小さな音や無音は、Whisper が「何だろう? 何だろう? …」のような繰り返しを返すことがある（文字起こしに 13 秒かかった）。
+
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`
 - 公式デバイス: `firmware/main/apps/app_avatar/app_avatar.cpp`, `.../view/ws_call.cpp`,

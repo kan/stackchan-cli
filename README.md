@@ -119,6 +119,14 @@ stackchan-cli say "やっほー"
 - **反応は編集可能なスクリプト**：daemon 初回起動時に `~/.stackchan/reactions/tap.txt` と `stroke.txt`
   を雛形生成。中身は REPL コマンド（`avatar`/`mouth`/`led`/`say`/`sleep` など）を行で並べるだけ。
   **再ビルド不要**で、ジェスチャ発火時にその場のファイル内容が実行される（`--reactions <dir>` で場所変更）。
+- 本体の画面をタップ → 話す → もう一度タップすると、**音声コマンド**として、daemon が聞き取った文を
+  `~/.stackchan/voice-commands.txt` のキーワードと照合し、当たった行のコマンドを実行する
+  （例: 「笑って」で `avatar happy`）。書式は `キーワード|別の書き方 => コマンド; コマンド`。
+  上の行ほど優先で、`*` の行はどれにも当たらなかったときに実行する。daemon の初回起動時に雛形を生成し、
+  保存すれば次の聞き取りから反映される。文字起こしの間は考えている顔（thinking）になる。
+  - gateway が音声を `STACKCHAN_AUDIO_HOOK_URL`（daemon が `127.0.0.1:8771` で受ける）へ送り、
+    daemon が gateway の Python に入っている faster-whisper で文字にする（約 3〜4 秒）。
+  - 話さずに試すには `stackchan-cli voice "笑って"`。ルールの一覧は `stackchan-cli voice`。`--voice=false` で無効。
 - daemon 稼働中は **one-shot も `repl` も `source` も**自動で IPC 転送される（その常駐 gateway を共有。
   `repl` は daemon があれば各行を転送、無ければ自前 gateway を起動）。転送したコマンドが失敗すると
   終了コードは 1 になる。
