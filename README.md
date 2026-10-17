@@ -20,10 +20,12 @@ stackchan-cli (Go)  --stdio MCP-->  stackchan-mcp gateway (Python)  --WebSocket-
 
 ## 前提
 
-- **Go** 1.22+（開発は 1.26）
-- **stackchan-mcp gateway**（[GitHub main 版](https://github.com/kisaragi-mochi/stackchan-mcp) 推奨。mDNS 広告対応）
+- **Go** 1.27+
+- **stackchan-mcp gateway 0.18.0**（firmware 1.17.0 と組で使う）。発話（`[tts]`）と聞き取り
+  （`[stt-faster-whisper]`）の追加モジュール込みで入れる。`av<19` は必須（PyAV 19 は
+  faster-whisper 1.2.1 が渡す `metadata_errors` 引数を受け付けず、文字起こしが失敗する）:
   ```
-  uv tool install --force "git+https://github.com/kisaragi-mochi/stackchan-mcp#subdirectory=gateway"
+  uv tool install --force --python 3.12 "stackchan-mcp[tts,stt-faster-whisper]==0.18.0" --with "av<19"
   ```
 - **StackChan** に stackchan-mcp ファームを書込み、WebSocket Gateway URL を本機へ向けてあること
   （captive portal の **Advanced** タブで `ws://<PC-LAN-IP>:8765/`。詳細は `CLAUDE.md`）。
@@ -143,7 +145,12 @@ stackchan-cli source examples/greet.txt
   動いていなければ CLI が `vv-engine\run.exe` をウィンドウ無しで自動起動する。
   セットアップは [`docs/tts-voicevox.md`](docs/tts-voicevox.md)。既定話者は 8=春日部つむぎ、
   発話後は自動で表情 `embarrassed`（`say --speaker N` / `say --face <name>` で変更可）。
-  `listen`（STT）は別途 STT extra が必要（未セットアップ）。
+- `listen`（聞き取り）: 本体のマイクで録音し、gateway が PC 内で文字起こしする（faster-whisper）。
+  `stackchan-cli listen [--sec 5] [--lang ja] [--model small] [--motion none]`。
+  既定モデルは `small`（CLI が `STACKCHAN_FASTER_WHISPER_MODEL=small` を gateway に渡す。`base` では
+  「スタックチャン」が「スタッフちゃん」になった）。初回はモデル（約 460MB）をダウンロードする。
+  CPU で録音 6 秒＋文字起こし約 4 秒。聞き取り中の表情切り替え（`--motion face-only`）は、本体の応答が
+  遅いと失敗することがあるので既定でオフ。
 - mDNS 自動検出が通らない環境では、デバイスに WebSocket URL を明示設定してください。
 - **PC の IP が変わったとき**（デバイスが gateway に繋がらなくなる）：
   - デバイスが繋がっている間に変えるなら

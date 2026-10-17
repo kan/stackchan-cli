@@ -231,6 +231,7 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   （メモの `state` は誤り）。`set_avatar`: `face` enum `idle|happy|thinking|sad|surprised|embarrassed|off`。
 - `say` / `listen` は **本 build ではフレームワークのみ**。TTS/STT は optional extra
   （`stackchan-mcp[tts-voicevox]` / `[stt-faster-whisper]` 等）を入れエンジン登録するまでエラー。
+  （v0.8.0 時点の記録。現在の導入方法は「2026-10-17 更新log」の「聞き取り（listen / STT）セットアップ」）
 - 追加の診断/制御ツール: `get_device_info` `get_head_angles` `gpio_test` `uart_diag`
   `check_vm_en` `set_servo_torque` `set_auto_torque_release` `get_touch_state`
   `set_mouth_sequence` `set_led` `set_all_leds` `set_leds` `clear_leds` `set_volume` `set_brightness`。
@@ -413,7 +414,8 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - `say` = gateway が **VOICEVOX で合成 → Opus 化 → WS でデバイスへ送出 → スピーカー再生**（ファーム変更不要）。
 - **GitHub main 版 gateway は VOICEVOX エンジン実装内蔵**（`tts/voicevox.py`、起動時自動登録）。
   既定 URL `http://127.0.0.1:50021` / `STACKCHAN_VOICEVOX_URL` で上書き。既定話者 3（ずんだもん）。
-- 必要物: ①VOICEVOX エンジン起動(:50021) ②gateway に `opuslib`（`uv tool install --force --with opuslib ...`）
+- 必要物: ①VOICEVOX エンジン起動(:50021) ②gateway に `opuslib`（当時は `uv tool install --force --with opuslib ...`。
+  現在は `[tts]` extra に含まれる。導入コマンドは「2026-10-17 更新log」を参照）
   ③**Windows 用 `opus.dll`**（opuslib が `find_library('opus')` で PATH 探索）。
   → **PyPI の PyOgg 同梱 libopus を流用**: `uv run --with pyogg python -c "...shutil.copy(pyogg/opus.dll, ~/.local/bin/opus.dll)"`。
   検証: `opuslib.Encoder(16000,1,APPLICATION_VOIP).encode(...)` が通れば OK。`~/.local/bin` はユーザー PATH 上。
@@ -491,6 +493,17 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 反応で LED とサーボが動くたびに USB シリアル（COM3）が一瞬切れる。消費電力の急増で電源が揺れている可能性。
 - デバイスのシリアルログは DTR/RTS を下げたまま開けばリセットされない（pyserial で `dtr=False`/`rts=False` を
   open 前に設定）。内部 SRAM の空きは 43KB 前後、最小 22KB。
+
+### 聞き取り（listen / STT）セットアップ（2026-10-17・成功）
+- gateway: `uv tool install --force --python 3.12 "stackchan-mcp[tts,stt-faster-whisper]==0.18.0" --with "av<19"`。
+  **`av<19` 必須**: PyAV 19.0.1 は faster-whisper 1.2.1 の `av.open(..., metadata_errors="ignore")` を受け付けず、
+  `open() got an unexpected keyword argument 'metadata_errors'` で文字起こしが失敗する（18.1.0 で解消）。
+- CLI: `stackchan-cli listen [--sec N] [--lang ja] [--model M] [--motion none|face-only|look-up]`（`listen` ツールを呼び、
+  結果の `text` を `heard: ...` と表示）。CLI は gateway に `STACKCHAN_FASTER_WHISPER_MODEL=small` を渡す
+  （`base` では「スタックチャン」→「スタッフちゃん」、`small` で正しく取れた。CPU で文字起こし約 4 秒）。
+- `--motion face-only`（聞き取り中に thinking 顔）は、デバイスの応答遅れで `set_avatar` がタイムアウトすると
+  listen ごと失敗し、直後に WS が切れたことがある。既定は `none`。
+- 周囲の音（YouTube 等）も拾う。テスト時は止める。
 
 ### VOICEVOX 自動起動
 - エンジンが応答しなければ CLI が `vv-engine\run.exe` をウィンドウ無しで起動（約 2〜4 秒で準備完了）。

@@ -22,9 +22,10 @@
   | `STACKCHAN_VOICEVOX_AUTOSTART` | `0` で自動起動しない |
 
 ### 2. gateway に opuslib（Opus エンコード）
-GitHub main 版 gateway は VOICEVOX エンジン実装を内蔵。Opus 化用の `opuslib` を追加する：
+gateway は VOICEVOX エンジン実装を内蔵。Opus 化用の `opuslib` は `[tts]` extra に含まれる
+（聞き取りも使うので `[stt-faster-whisper]` と、その不具合回避の `av<19` も一緒に入れる。README 参照）：
 ```powershell
-uv tool install --force --with opuslib "git+https://github.com/kisaragi-mochi/stackchan-mcp#subdirectory=gateway"
+uv tool install --force --python 3.12 "stackchan-mcp[tts,stt-faster-whisper]==0.18.0" --with "av<19"
 ```
 
 ### 3. Windows 用 libopus（`opus.dll`）を PATH に置く

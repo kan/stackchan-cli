@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -111,6 +112,8 @@ func dispatch(cmd string, args []string, c *mcp.Client) error {
 		return cmdBrightness(args, c)
 	case "say":
 		return cmdSay(args, c)
+	case "listen":
+		return cmdListen(args, c)
 	case "photo":
 		return cmdPhoto(args, c)
 	case "call":
@@ -147,6 +150,9 @@ Commands:
   volume <0-100>
   brightness <0-100>
   say [--speaker N] [--face F] <text>   speak via VOICEVOX (engine auto-started if needed)
+  listen [--sec N] [--lang ja] [--model M] [--motion none|face-only|look-up]
+                         record from the device mic and print the transcription
+                         (needs the gateway's stt-faster-whisper extra)
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
 
@@ -157,6 +163,7 @@ Environment:
   STACKCHAN_VOICEVOX_URL        VOICEVOX engine URL (default http://127.0.0.1:50021)
   STACKCHAN_VOICEVOX_ENGINE     path to vv-engine\run.exe (default: standard install dirs)
   STACKCHAN_VOICEVOX_AUTOSTART  0 = never start the engine automatically
+  STACKCHAN_FASTER_WHISPER_MODEL  speech recognition model for listen (default small)
 
 Per-command flags:
   --verbose           forward the gateway's stderr logs (one-shot mode)
@@ -245,6 +252,11 @@ func gatewayEnv() []string {
 	if os.Getenv("STACKCHAN_VOICEVOX_DEFAULT_SPEAKER") == "" {
 		env = append(env, "STACKCHAN_VOICEVOX_DEFAULT_SPEAKER=8")
 	}
+	// Speech recognition: the gateway's default "base" model misheard
+	// "スタックチャン" as "スタッフちゃん"; "small" got it right (~4s on CPU).
+	if os.Getenv("STACKCHAN_FASTER_WHISPER_MODEL") == "" {
+		env = append(env, "STACKCHAN_FASTER_WHISPER_MODEL=small")
+	}
 	return env
 }
 
@@ -290,6 +302,7 @@ func waitForDevice(c *mcp.Client) error {
 var longToolTimeouts = map[string]time.Duration{
 	"say":             5 * time.Minute, // blocks until playback ends
 	"take_photo":      60 * time.Second,
+	"listen":          5 * time.Minute, // capture ≤ 30s + transcription (first call downloads the model)
 	"load_avatar_set": (avatarLoadTimeout + 10) * time.Second,
 }
 
@@ -579,6 +592,45 @@ func cmdSay(args []string, c *mcp.Client) error {
 				fmt.Fprintf(os.Stderr, "warning: set_avatar %s failed: %v\n", *face, err)
 			}
 		}
+		return nil
+	})
+}
+
+func cmdListen(args []string, c *mcp.Client) error {
+	set, verbose := fs("listen")
+	sec := set.Float64("sec", 5, "seconds to record, 0.1..30")
+	lang := set.String("lang", "ja", "language code for transcription")
+	// Default none: the face change waits on the device, which sometimes times
+	// out and fails the whole listen.
+	motion := set.String("motion", "none", "while listening: none | face-only (thinking face) | look-up")
+	model := set.String("model", "", "STT model, e.g. base | small | medium (default: the gateway's STACKCHAN_FASTER_WHISPER_MODEL, small unless set)")
+	if err := set.Parse(args); err != nil {
+		return err
+	}
+	if !(*sec >= 0.1 && *sec <= 30) { // also rejects NaN
+		return fmt.Errorf("--sec must be 0.1..30")
+	}
+	listenArgs := map[string]any{
+		"duration_ms": int(math.Round(*sec * 1000)),
+		"language":    *lang,
+		"motion":      *motion,
+	}
+	if *model != "" {
+		listenArgs["model"] = *model
+	}
+	return withDevice(*verbose, c, func(c *mcp.Client) error {
+		res, err := callToolQuiet(c, "listen", listenArgs)
+		if err != nil {
+			return err
+		}
+		var r struct {
+			Text *string `json:"text"`
+		}
+		if json.Unmarshal([]byte(res.Text()), &r) != nil || r.Text == nil {
+			fmt.Fprintln(out, res.Text())
+			return fmt.Errorf("listen: no transcription in the result")
+		}
+		fmt.Fprintf(out, "heard: %s\n", *r.Text)
 		return nil
 	})
 }
@@ -893,6 +945,7 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("volume"),
 		readline.PcItem("brightness"),
 		readline.PcItem("say", readline.PcItem("--speaker"), readline.PcItem("--face")),
+		readline.PcItem("listen", readline.PcItem("--sec"), readline.PcItem("--lang"), readline.PcItem("--model"), readline.PcItem("--motion")),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
 		readline.PcItem("sleep"),
@@ -925,6 +978,7 @@ func replHelp() {
   all-leds --r N --g N --b N  |  clear-leds
   volume <0-100>  |  brightness <0-100>
   say [--speaker N] <text>       speak via VOICEVOX (3=ずんだもん, 8=春日部つむぎ)
+  listen [--sec N]               record from the device mic and print the transcription
   photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
   sleep <ms>                     pause (for choreography)
