@@ -173,19 +173,25 @@ func handleConn(conn net.Conn, c *mcp.Client) {
 	}
 	line = strings.TrimRight(line, "\r\n")
 	withOutput(conn, func() {
-		if _, err := runLine(line, c); err != nil {
-			// The status must stay on one line.
-			msg := strings.ReplaceAll(err.Error(), "\n", " ")
-			fmt.Fprintf(conn, "%serror %s\n", ipcStatusPrefix, msg)
-			return
-		}
-		fmt.Fprintf(conn, "%sok\n", ipcStatusPrefix)
+		_, err := runLine(line, c)
+		writeIPCStatus(conn, err)
 	})
 }
 
 // ipcStatusPrefix marks the last line of a daemon reply, which carries the
 // command's outcome ("ok" or "error <msg>") so the client can set its exit code.
 const ipcStatusPrefix = "\x1estackchan-ipc:"
+
+// writeIPCStatus writes the status line that ends a daemon reply.
+func writeIPCStatus(w io.Writer, err error) {
+	if err != nil {
+		// The status must stay on one line.
+		msg := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(err.Error())
+		fmt.Fprintf(w, "%serror %s\n", ipcStatusPrefix, msg)
+		return
+	}
+	fmt.Fprintf(w, "%sok\n", ipcStatusPrefix)
+}
 
 // timestampStderr prefixes every stderr line with the time, so the daemon log
 // shows when each event happened. It swaps os.Stderr for a pipe, which also
@@ -251,33 +257,48 @@ func queueLatest(q chan touchEvent, ev touchEvent) {
 // unless it came within a second of the touch being answered (one palm
 // contact reported as two gestures) or has waited so long the moment passed.
 func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, stop <-chan struct{}) {
-	const (
-		duplicateWindow = time.Second
-		maxWait         = 10 * time.Second
-	)
-	var lastAnswered time.Time // arrival time of the last touch we reacted to
+	judge := touchJudge{tapMax: tapMax}
 	for {
 		select {
 		case <-stop:
 			return
 		case ev := <-touches:
-			if ev.at.Sub(lastAnswered) < duplicateWindow {
-				fmt.Fprintf(os.Stderr, "daemon: touch ignored (same contact as the previous one): %s %dms\n", ev.Subtype, ev.DurationMs)
+			gesture, ignored := judge.judge(ev, time.Now())
+			if gesture == "" {
+				fmt.Fprintf(os.Stderr, "daemon: touch ignored (%s): %s %dms\n", ignored, ev.Subtype, ev.DurationMs)
 				continue
-			}
-			if waited := time.Since(ev.at); waited > maxWait {
-				fmt.Fprintf(os.Stderr, "daemon: touch ignored (waited %s during a reaction): %s %dms\n", waited.Round(time.Second), ev.Subtype, ev.DurationMs)
-				continue
-			}
-			lastAnswered = ev.at
-			gesture := "stroke"
-			if time.Duration(ev.DurationMs)*time.Millisecond <= tapMax {
-				gesture = "tap"
 			}
 			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
 			reactToGesture(c, gesture)
 		}
 	}
+}
+
+const (
+	touchDuplicateWindow = time.Second      // one palm contact reported as two gestures
+	touchMaxWait         = 10 * time.Second // the moment has passed
+)
+
+// touchJudge decides how reactToTouches answers each touch.
+type touchJudge struct {
+	tapMax       time.Duration
+	lastAnswered time.Time // arrival time of the last touch we reacted to
+}
+
+// judge returns the gesture to react with ("tap" or "stroke"), or "" and why
+// the touch is ignored. now is when the touch is taken off the queue.
+func (j *touchJudge) judge(ev touchEvent, now time.Time) (gesture, ignored string) {
+	if ev.at.Sub(j.lastAnswered) < touchDuplicateWindow {
+		return "", "same contact as the previous one"
+	}
+	if waited := now.Sub(ev.at); waited > touchMaxWait {
+		return "", fmt.Sprintf("waited %s during a reaction", waited.Round(time.Second))
+	}
+	j.lastAnswered = ev.at
+	if time.Duration(ev.DurationMs)*time.Millisecond <= j.tapMax {
+		return "tap", ""
+	}
+	return "stroke", ""
 }
 
 // watchSessions logs device (re)connections and, when enabled, re-sends the
@@ -427,7 +448,12 @@ func daemonAvailable() bool {
 // caller can fall back to running the command itself; err is the command's
 // failure as reported by the daemon (or a broken connection).
 func sendToDaemon(argv []string) (forwarded bool, err error) {
-	conn, err := net.DialTimeout("tcp", ipcAddr, 250*time.Millisecond)
+	return forwardTo(ipcAddr, argv, os.Stdout)
+}
+
+// forwardTo is sendToDaemon for a daemon on addr, writing the reply to w.
+func forwardTo(addr string, argv []string, w io.Writer) (forwarded bool, err error) {
+	conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
 	if err != nil {
 		return false, nil
 	}
@@ -448,7 +474,7 @@ func sendToDaemon(argv []string) (forwarded bool, err error) {
 			}
 			return true, nil
 		}
-		fmt.Println(line)
+		fmt.Fprintln(w, line)
 	}
 	if err := sc.Err(); err != nil {
 		return true, err

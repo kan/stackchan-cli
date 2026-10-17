@@ -82,7 +82,7 @@ func ensureVoicevox() error {
 	if err != nil {
 		return fmt.Errorf("STACKCHAN_VOICEVOX_URL: %w", err)
 	}
-	if ip := net.ParseIP(u.Hostname()); u.Hostname() != "localhost" && (ip == nil || !ip.IsLoopback()) {
+	if !isLoopbackHost(u.Hostname()) {
 		return fmt.Errorf("VOICEVOX not reachable at %s (remote host; not auto-starting)", base)
 	}
 	port := u.Port()
@@ -121,6 +121,16 @@ func ensureVoicevox() error {
 	}
 	fmt.Fprintln(os.Stderr, "voicevox: engine ready")
 	return nil
+}
+
+// isLoopbackHost reports whether host (a URL's hostname) is this machine,
+// the only place an engine can be started.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // openStackchanLog opens ~/.stackchan/<name> for appending.

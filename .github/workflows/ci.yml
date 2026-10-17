@@ -45,5 +45,23 @@ jobs:
       - name: go build
         run: go build ./...
 
+      # The race detector needs cgo, which the Linux runner has (gcc).
       - name: go test
+        if: runner.os == 'Windows'
         run: go test ./...
+
+      - name: go test (race)
+        if: runner.os == 'Linux'
+        env:
+          CGO_ENABLED: "1"
+        run: go test -race ./...
+
+  python:
+    name: Python scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The runner's python3 is enough: the scripts use only the standard library.
+      - name: unittest
+        run: python3 -m unittest discover -s scripts -p "test_*.py" -v

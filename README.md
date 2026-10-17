@@ -36,6 +36,15 @@ stackchan-cli (Go)  --stdio MCP-->  stackchan-mcp gateway (Python)  --WebSocket-
 go build -o stackchan-cli .
 ```
 
+## テスト
+
+実機、gateway、VOICEVOX は要らない。CI（GitHub Actions）は Go のテストを Windows と Linux で、Python のテストを Linux で実行する。
+
+```
+go test ./...
+python -m unittest discover -s scripts -p "test_*.py"
+```
+
 ## 使い方
 
 ```bash

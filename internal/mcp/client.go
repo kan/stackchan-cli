@@ -128,15 +128,22 @@ func Start(exePath string, args []string, env []string, stderr io.Writer) (*Clie
 		return nil, fmt.Errorf("start %s: %w", exePath, err)
 	}
 
+	c := newClient(stdin, stdout)
+	c.cmd = cmd
+	return c, nil
+}
+
+// newClient talks to a gateway over the given stdin/stdout and starts the
+// read loop. Start adds the child process; tests pass pipes instead.
+func newClient(stdin io.WriteCloser, stdout io.Reader) *Client {
 	c := &Client{
-		cmd:     cmd,
 		stdin:   stdin,
 		timeout: 20 * time.Second,
 		nextID:  1,
 		pending: make(map[int]chan response),
 	}
 	go c.readLoop(stdout)
-	return c, nil
+	return c
 }
 
 func (c *Client) readLoop(stdout io.Reader) {
@@ -287,6 +294,9 @@ func (c *Client) CallToolTimeout(name string, args map[string]any, timeout time.
 // If it doesn't exit promptly, fall back to killing it.
 func (c *Client) Close() error {
 	_ = c.stdin.Close()
+	if c.cmd == nil {
+		return nil
+	}
 	done := make(chan error, 1)
 	go func() { done <- c.cmd.Wait() }()
 	select {

@@ -51,11 +51,12 @@ def esptool(port, *args):
 
 
 def find_nvs(dump):
+    """Return (offset, size) of the nvs partition. Raises ValueError if absent."""
     for i in range(0, 0xC00, 32):
         e = dump[i:i + 32]
         if e[:2] == b"\xaa\x50" and e[12:28].split(b"\0")[0] == b"nvs":
             return struct.unpack_from("<II", e, 4)
-    sys.exit("nvs partition not found in the partition table")
+    raise ValueError("nvs partition not found in the partition table")
 
 
 StrEntry = collections.namedtuple("StrEntry", "off ns key size value hdr_ok data_ok")
@@ -101,6 +102,42 @@ def ws_url_entries(nvs):
     return [e for e in string_entries(nvs) if e.ns == "websocket" and e.key == "url"]
 
 
+def current_ws_url(nvs):
+    """Return (entry, url) of the single websocket.url entry.
+
+    Raises ValueError when any string entry fails its CRC check (the parser
+    and the format disagree) or there is not exactly one websocket.url.
+    """
+    if not all(e.hdr_ok and e.data_ok for e in string_entries(nvs)):
+        raise ValueError("CRC mismatch in existing entries; refusing to patch (parser/format mismatch?)")
+    urls = ws_url_entries(nvs)
+    if len(urls) != 1:
+        raise ValueError(f"expected exactly one websocket.url entry, found {len(urls)}")
+    return urls[0], urls[0].value.split(b"\0")[0].decode()
+
+
+def patch_ws_url(nvs, entry, new):
+    """Replace the value of entry (from current_ws_url) with new (bytes) in nvs.
+
+    nvs is a bytearray, patched in place; a shorter value is NUL-padded.
+    Raises ValueError when new does not fit or the patched entry fails the
+    self-check.
+    """
+    off, size = entry.off, entry.size
+    if len(new) + 1 > size:
+        raise ValueError(f"new URL is {len(new)} bytes; at most {size - 1} fit in place "
+                         "(use the captive portal or a full reflash instead)")
+    padded = new + b"\0" * (size - len(new))
+    nvs[off + ENTRY:off + ENTRY + size] = padded
+    struct.pack_into("<I", nvs, off + 28, crc(padded))
+    hdr = nvs[off:off + ENTRY]
+    struct.pack_into("<I", nvs, off + 4, crc(hdr[0:4] + hdr[8:32]))
+
+    check = next((e for e in ws_url_entries(nvs) if e.off == off), None)
+    if check is None or not (check.hdr_ok and check.data_ok) or check.value.split(b"\0")[0] != new:
+        raise ValueError("self-check of the patched entry failed; nothing written")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--port", required=True, help="serial port, e.g. COM3")
@@ -119,36 +156,19 @@ def main():
     dump = bytearray(open(dump_path, "rb").read())
     print(f"backup: {dump_path} (flash 0x8000..0x{PT_OFFSET + DUMP_SIZE:x})")
 
-    nvs_off, nvs_size = find_nvs(dump)
-    start = nvs_off - PT_OFFSET
-    if start + nvs_size > len(dump):
-        sys.exit(f"nvs partition 0x{nvs_off:x}+0x{nvs_size:x} is outside the dump")
-    nvs = dump[start:start + nvs_size]
-
-    if not all(e.hdr_ok and e.data_ok for e in string_entries(nvs)):
-        sys.exit("CRC mismatch in existing entries; refusing to patch (parser/format mismatch?)")
-    urls = ws_url_entries(nvs)
-    if len(urls) != 1:
-        sys.exit(f"expected exactly one websocket.url entry, found {len(urls)}")
-    off, size = urls[0].off, urls[0].size
-    current = urls[0].value.split(b"\0")[0].decode()
-    print(f"current websocket.url: {current!r}")
-    if args.show:
-        return
-
-    new = args.url.encode()
-    if len(new) + 1 > size:
-        sys.exit(f"new URL is {len(new)} bytes; at most {size - 1} fit in place "
-                 "(use the captive portal or a full reflash instead)")
-    padded = new + b"\0" * (size - len(new))
-    nvs[off + ENTRY:off + ENTRY + size] = padded
-    struct.pack_into("<I", nvs, off + 28, crc(padded))
-    hdr = nvs[off:off + ENTRY]
-    struct.pack_into("<I", nvs, off + 4, crc(hdr[0:4] + hdr[8:32]))
-
-    check = ws_url_entries(nvs)[0]
-    if not (check.hdr_ok and check.data_ok) or check.value.split(b"\0")[0] != new:
-        sys.exit("self-check of the patched entry failed; nothing written")
+    try:
+        nvs_off, nvs_size = find_nvs(dump)
+        start = nvs_off - PT_OFFSET
+        if start + nvs_size > len(dump):
+            raise ValueError(f"nvs partition 0x{nvs_off:x}+0x{nvs_size:x} is outside the dump")
+        nvs = dump[start:start + nvs_size]
+        entry, current = current_ws_url(nvs)
+        print(f"current websocket.url: {current!r}")
+        if args.show:
+            return
+        patch_ws_url(nvs, entry, args.url.encode())
+    except ValueError as e:
+        sys.exit(str(e))
     print(f"new websocket.url:     {args.url!r}")
 
     if args.dry_run:
