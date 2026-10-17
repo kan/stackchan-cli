@@ -91,6 +91,41 @@ func TestAbsSourcePath(t *testing.T) {
 	}
 }
 
+// The usage writes `call <tool> --json '{...}'`; the flags must be read
+// there as well as before the name.
+func TestParseCallArgs(t *testing.T) {
+	tests := []struct {
+		args    []string
+		tool    string
+		want    map[string]any
+		verbose bool
+	}{
+		{[]string{"set_off_timeout", "--json", `{"seconds":0}`}, "set_off_timeout", map[string]any{"seconds": 0.0}, false},
+		{[]string{"--json", `{"seconds":0}`, "set_off_timeout"}, "set_off_timeout", map[string]any{"seconds": 0.0}, false},
+		{[]string{"get_status"}, "get_status", map[string]any{}, false},
+		{[]string{"get_status", "--verbose"}, "get_status", map[string]any{}, true},
+		{[]string{"--verbose", "set_off_timeout", "--json", `{"seconds":0}`}, "set_off_timeout", map[string]any{"seconds": 0.0}, true},
+		{[]string{"--json", `{"seconds":0}`, "set_off_timeout", "--verbose"}, "set_off_timeout", map[string]any{"seconds": 0.0}, true},
+	}
+	for _, tt := range tests {
+		tool, got, verbose, err := parseCallArgs(tt.args)
+		if err != nil || tool != tt.tool || !reflect.DeepEqual(got, tt.want) || verbose != tt.verbose {
+			t.Errorf("parseCallArgs(%q) = %q, %v, %v, %v", tt.args, tool, got, verbose, err)
+		}
+	}
+	for _, args := range [][]string{
+		{},
+		{"--json", "{}"},
+		{"t", "--json", "not json"},
+		{"t", "extra"},
+		{"--verbose", "t", "extra"},
+	} {
+		if _, _, _, err := parseCallArgs(args); err == nil {
+			t.Errorf("parseCallArgs(%q) accepted it", args)
+		}
+	}
+}
+
 func TestParseStatus(t *testing.T) {
 	tests := []struct {
 		text          string

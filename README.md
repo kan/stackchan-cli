@@ -162,6 +162,11 @@ stackchan-cli source examples/greet.txt
   動いていなければ CLI が `vv-engine\run.exe` をウィンドウ無しで自動起動する。
   セットアップは [`docs/tts-voicevox.md`](docs/tts-voicevox.md)。既定話者は 8=春日部つむぎ、
   発話後は自動で表情 `embarrassed`（`say --speaker N` / `say --face <name>` で変更可）。
+  文の中の `{date}` `{weekday}` `{time}` は、話すときの日付・曜日・時刻（例: `2026年10月17日、土曜日、22時40分`）になる。
+- `embarrassed` を標準の表情にしている。発話のあと、音声コマンドの文字起こしのあとに戻す表情で、
+  daemon は本体がつながるたび、この表情へ切り替える（本体の起動時の表情は `idle`）。
+- 本体の画面は、操作が無いと 5 分後に消える。止めるには
+  `stackchan-cli call set_off_timeout --json '{"seconds":0}'`（本体に保存され、再起動後も有効。戻すときは 300）。
 - `listen`（聞き取り）: 本体のマイクで録音し、gateway が PC 内で文字起こしする（faster-whisper）。
   `stackchan-cli listen [--sec 5] [--lang ja] [--model small] [--motion none]`。
   既定モデルは `small`（CLI が `STACKCHAN_FASTER_WHISPER_MODEL=small` を gateway に渡す。`base` では

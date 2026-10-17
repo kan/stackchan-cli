@@ -585,17 +585,36 @@ func cmdAllLEDs(args []string, e cmdEnv) error {
 	return callAndPrint(*verbose, true, "set_all_leds", map[string]any{"r": *r, "g": *g, "b": *b}, e)
 }
 
+// restFace is the face StackChan rests in: after speaking, after a voice
+// command is transcribed, and when the device connects (its own is idle).
+const restFace = "embarrassed"
+
+// expandSayVars fills in the placeholders say text can use, so a rule like
+// `say "{date}、{weekday}、{time}です"` tells the time. Unknown ones stay as is.
+func expandSayVars(text string, now time.Time) string {
+	if !strings.Contains(text, "{") {
+		return text
+	}
+	weekdays := [...]string{"日", "月", "火", "水", "木", "金", "土"}
+	return strings.NewReplacer(
+		"{date}", fmt.Sprintf("%d年%d月%d日", now.Year(), now.Month(), now.Day()),
+		"{weekday}", weekdays[now.Weekday()]+"曜日",
+		"{time}", fmt.Sprintf("%d時%d分", now.Hour(), now.Minute()),
+	).Replace(text)
+}
+
 func cmdSay(args []string, e cmdEnv) error {
 	set, verbose := fs("say")
 	speaker := set.Int("speaker", 0, "VOICEVOX speaker id (0 = gateway default; e.g. 3=ずんだもん, 8=春日部つむぎ)")
-	face := set.String("face", "embarrassed", "avatar face to set after speaking (\"\" = leave unchanged)")
+	face := set.String("face", restFace, "avatar face to set after speaking (\"\" = leave unchanged)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
 	if set.NArg() < 1 {
 		return fmt.Errorf("say requires text (put flags first, e.g. say --speaker 8 \"...\")")
 	}
-	sayArgs := map[string]any{"text": strings.Join(set.Args(), " ")}
+	text := strings.Join(set.Args(), " ")
+	sayArgs := map[string]any{}
 	if *speaker > 0 {
 		sayArgs["speaker_id"] = *speaker
 	}
@@ -606,6 +625,8 @@ func cmdSay(args []string, e cmdEnv) error {
 		if err := <-engineReady; err != nil {
 			fmt.Fprintf(e.errOut, "warning: %v\n", err)
 		}
+		// Filled in now, not before a one-shot gateway waited for the device.
+		sayArgs["text"] = expandSayVars(text, time.Now())
 		if _, err := callTool(c, "say", sayArgs, e.out); err != nil {
 			return err
 		}
@@ -734,19 +755,37 @@ func openInViewer(path string) {
 }
 
 func cmdCall(args []string, e cmdEnv) error {
-	set, verbose := fs("call")
-	jsonArgs := set.String("json", "{}", "tool arguments as a JSON object")
-	if err := set.Parse(args); err != nil {
+	tool, toolArgs, verbose, err := parseCallArgs(args)
+	if err != nil {
 		return err
 	}
+	return callAndPrint(verbose, true, tool, toolArgs, e)
+}
+
+// parseCallArgs reads `call` arguments: a tool name and --json, in either order.
+func parseCallArgs(args []string) (tool string, toolArgs map[string]any, verbose bool, err error) {
+	set, verboseFlag := fs("call")
+	jsonArgs := set.String("json", "{}", "tool arguments as a JSON object")
+	// Flags may come before and after the tool name (the usage writes
+	// call <tool> --json ...), but flag parsing stops at the first non-flag,
+	// so parse again after taking the name off.
+	if err := set.Parse(args); err != nil {
+		return "", nil, false, err
+	}
 	if set.NArg() < 1 {
-		return fmt.Errorf("call requires a tool name")
+		return "", nil, false, fmt.Errorf("call requires a tool name")
 	}
-	var toolArgs map[string]any
+	tool = set.Arg(0)
+	if err := set.Parse(set.Args()[1:]); err != nil {
+		return "", nil, false, err
+	}
+	if set.NArg() > 0 {
+		return "", nil, false, fmt.Errorf("call: unexpected arguments %q (put tool arguments in --json)", set.Args())
+	}
 	if err := json.Unmarshal([]byte(*jsonArgs), &toolArgs); err != nil {
-		return fmt.Errorf("--json: %w", err)
+		return "", nil, false, fmt.Errorf("--json: %w", err)
 	}
-	return callAndPrint(*verbose, true, set.Arg(0), toolArgs, e)
+	return tool, toolArgs, *verboseFlag, nil
 }
 
 // ---- REPL ------------------------------------------------------------------

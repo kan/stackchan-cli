@@ -41,13 +41,15 @@ const defaultVoiceCommands = `# 音声コマンド: 画面をタップ → 話�
 # - 照合の前に、全角カタカナはひらがなに、全角英数は半角に、大文字は小文字にそろえ、
 #   記号と空白は取り除く（キーワードも同じようにそろえる）。
 # - コマンドは REPL と同じ（avatar / say / move-head / photo / sleep / all-leds ...）。
+#   say の文の {date} {weekday} {time} は、その時の日付・曜日・時刻（例: 2026年10月17日、土曜日、22時40分）になる。
 # - 保存すれば次の聞き取りから反映される（再起動は要らない）。
 # - stackchan-cli voice "笑って" で、話さずに試せる。stackchan-cli voice だけなら一覧を表示する。
 笑って|わらって|にこにこ => avatar happy
 悲しい|かなしい => avatar sad
 写真|しゃしん|撮って => say --face happy "撮るよ"; photo; say --face happy "撮ったよ"
 首振って|首ふって|くびふって => move-head --yaw -30 --pitch 45; sleep 500; move-head --yaw 30 --pitch 45; sleep 500; move-head --yaw 0 --pitch 45
-* => say --face sad "ごめんね、わからなかった"; sleep 2000; avatar idle
+何時|なんじ|何日|なんにち|日付 => say "{date}、{weekday}、{time}です"
+* => say --face sad "ごめんね、わからなかった"; sleep 2000; avatar embarrassed
 `
 
 type voiceRule struct {
@@ -385,9 +387,9 @@ func (h *voiceHook) process(stop <-chan struct{}) {
 			go func() { defer close(thinking); h.face("thinking") }()
 			heard, err := h.transcribe(audio)
 			<-thinking
-			// Back to idle before the commands, so a rule that sets no face
+			// Back to the rest face before the commands, so a rule that sets no face
 			// does not leave the thinking one.
-			h.face("idle")
+			h.face(restFace)
 			if err != nil {
 				// Run the * rule as for nothing heard, so the failure shows on
 				// the device too.

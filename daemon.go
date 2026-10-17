@@ -382,6 +382,10 @@ func watchSessions(c *mcp.Client, avatar bool, stop <-chan struct{}) {
 						fmt.Fprintf(os.Stderr, "daemon: avatar loaded %s\n", text)
 					}
 				}
+				// The device comes up with its idle face; switch to ours.
+				if _, err := callTool(c, "set_avatar", map[string]any{"face": restFace}, nil); err != nil {
+					fmt.Fprintf(os.Stderr, "daemon: set_avatar %s: %v\n", restFace, err)
+				}
 			}
 		}
 		select {

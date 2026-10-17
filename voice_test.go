@@ -116,6 +116,9 @@ func TestDefaultVoiceCommandsParse(t *testing.T) {
 	if got, _ := vr.match("スタックチャン、写真撮って"); !reflect.DeepEqual(got, []string{`say --face happy "撮るよ"`, "photo", `say --face happy "撮ったよ"`}) {
 		t.Errorf("写真撮って -> %q", got)
 	}
+	if got, _ := vr.match("いま何時？"); !reflect.DeepEqual(got, []string{`say "{date}、{weekday}、{time}です"`}) {
+		t.Errorf("いま何時？ -> %q", got)
+	}
 }
 
 // runVoice reads the user's rules file and runs the matched commands.
@@ -139,6 +142,24 @@ func TestRunVoiceUsesRulesFile(t *testing.T) {
 	}
 	if err := runVoice("ヘルプ", cmdEnv{out: &out, errOut: &errOut}); err == nil {
 		t.Error("runVoice with a failing command returned nil")
+	}
+}
+
+func TestExpandSayVars(t *testing.T) {
+	sat := time.Date(2026, 10, 17, 22, 5, 0, 0, time.Local)
+	tests := []struct{ in, want string }{
+		{"{date}、{weekday}、{time}です", "2026年10月17日、土曜日、22時5分です"},
+		{"今日は{weekday}", "今日は土曜日"},
+		{"{unknown} と {", "{unknown} と {"},
+		{"こんにちは", "こんにちは"},
+	}
+	for _, tt := range tests {
+		if got := expandSayVars(tt.in, sat); got != tt.want {
+			t.Errorf("expandSayVars(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+	if got := expandSayVars("{weekday}", sat.AddDate(0, 0, 1)); got != "日曜日" {
+		t.Errorf("Sunday = %q", got)
 	}
 }
 
@@ -262,8 +283,8 @@ func TestVoiceHookTranscribesAndRuns(t *testing.T) {
 		t.Fatal("the transcription was never run")
 	}
 	mu.Lock()
-	if got := strings.Join(steps, ","); got != "thinking,transcribe,idle,run" {
-		t.Errorf("steps = %s, want thinking,transcribe,idle,run", got)
+	if got, want := strings.Join(steps, ","), "thinking,transcribe,"+restFace+",run"; got != want {
+		t.Errorf("steps = %s, want %s", got, want)
 	}
 	mu.Unlock()
 

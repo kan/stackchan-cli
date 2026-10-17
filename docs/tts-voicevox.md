@@ -56,6 +56,8 @@ stackchan-cli say --face "" "顔を変えない"   # 発話後の表情変更を
 - 既定話者は CLI が `STACKCHAN_VOICEVOX_DEFAULT_SPEAKER=8`（春日部つむぎ）を注入。
   変えたい時は環境変数で上書き、または `say --speaker N`。
 - **発話後は自動で `set_avatar embarrassed`**（`--face <name>` で変更、`--face ""` で無効）。
+- 文の中の `{date}` `{weekday}` `{time}` は、話すときの日付・曜日・時刻に置き換わる
+  （`say "{date}、{weekday}、{time}です"` → `2026年10月17日、土曜日、22時40分です`）。
 - `say` は再生が終わるまでブロック（フレームを実時間ペースで送出）。終了時に gateway が
   `tts stop` を送り、口パクが止まる（CLI のグレースフル終了で確実に届く）。
 
