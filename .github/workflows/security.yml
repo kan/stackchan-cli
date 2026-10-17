@@ -20,11 +20,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+      # Build govulncheck for the runner itself; GOOS is set only when it
+      # analyzes, so the Windows-only files are checked too.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
       # Reports only vulnerabilities in code paths the module actually calls.
-      # The Windows-only files are included by checking that target too.
       - name: govulncheck (linux)
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        run: govulncheck ./...
       - name: govulncheck (windows)
-        env:
-          GOOS: windows
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+        run: GOOS=windows govulncheck ./...
