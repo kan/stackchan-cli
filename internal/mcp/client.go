@@ -31,7 +31,14 @@ type Client struct {
 	nextID  int
 	pending map[int]chan response
 	onNote  func(method string, params json.RawMessage)
+
+	done chan struct{} // closed when the gateway's stdout closes
 }
+
+// Done is closed when the gateway closes its stdout (it exited, or is
+// exiting); every later call fails. A long-running user (the daemon) watches
+// it to start over with a new gateway.
+func (c *Client) Done() <-chan struct{} { return c.done }
 
 // OnNotification registers a handler for server-initiated notifications
 // (e.g. the gateway's "stackchan/event" touch events). It runs on the read
@@ -141,6 +148,7 @@ func newClient(stdin io.WriteCloser, stdout io.Reader) *Client {
 		timeout: 20 * time.Second,
 		nextID:  1,
 		pending: make(map[int]chan response),
+		done:    make(chan struct{}),
 	}
 	go c.readLoop(stdout)
 	return c
@@ -179,6 +187,7 @@ func (c *Client) readLoop(stdout io.Reader) {
 		delete(c.pending, id)
 	}
 	c.mu.Unlock()
+	close(c.done)
 }
 
 func (c *Client) call(method string, params any) (json.RawMessage, error) {

@@ -24,6 +24,50 @@ func forward(t *testing.T, addr string, argv ...string) (stdout, stderr string, 
 	return o.String(), e.String(), forwarded, err
 }
 
+// The gateway's per-call log line is dropped, even split across writes.
+func TestDropLines(t *testing.T) {
+	var out bytes.Buffer
+	d := &dropLines{w: &out, drop: gatewayLogNoise}
+	for _, chunk := range []string{
+		"12:00 [INFO] Gateway started\n12:00 [INFO] mcp: Processing req",
+		"uest of type CallToolRequest\n12:01 [ERROR] Timeout",
+		" waiting for ESP32\n",
+	} {
+		if n, err := d.Write([]byte(chunk)); err != nil || n != len(chunk) {
+			t.Fatalf("Write = %d, %v", n, err)
+		}
+	}
+	if want := "12:00 [INFO] Gateway started\n12:01 [ERROR] Timeout waiting for ESP32\n"; out.String() != want {
+		t.Errorf("log = %q, want %q", out.String(), want)
+	}
+
+	// The last words of a crash, without a newline, are written on Flush.
+	_, _ = d.Write([]byte("Fatal Python error: Aborted"))
+	d.Flush()
+	if !strings.HasSuffix(out.String(), "Fatal Python error: Aborted") {
+		t.Errorf("after Flush: log ends %q", out.String()[max(0, out.Len()-40):])
+	}
+
+	// Output that never ends a line is written once it passes the cap.
+	out.Reset()
+	_, _ = d.Write(bytes.Repeat([]byte("\rdownloading"), dropLinesMax/10))
+	if out.Len() == 0 {
+		t.Error("over the cap without a newline: nothing written")
+	}
+}
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+// A log that cannot be written must not stop the gateway's stderr copier.
+func TestDropLinesSwallowsWriteErrors(t *testing.T) {
+	d := &dropLines{w: failingWriter{}, drop: gatewayLogNoise}
+	if n, err := d.Write([]byte("line\n")); err != nil || n != 5 {
+		t.Errorf("Write = %d, %v; want 5, nil", n, err)
+	}
+}
+
 func TestForwardToDaemonSuccess(t *testing.T) {
 	addr := listenLocal(t, serveWithoutGateway)
 	stdout, stderr, forwarded, err := forward(t, addr, "help")

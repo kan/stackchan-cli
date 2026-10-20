@@ -156,7 +156,12 @@ stackchan-cli say "やっほー"
   `repl` は daemon があれば各行を転送、無ければ自前 gateway を起動）。転送したコマンドが失敗すると
   終了コードは 1 になる。
 - daemon は起動時に **VOICEVOX エンジンをウィンドウ無しで自動起動**する（後述）。
-- daemon のログ（stderr）は各行に時刻が付く。
+- daemon のログ（stderr）は各行に時刻が付く。daemon が起動した gateway の出力は `~/.stackchan/gateway.log` に残る。
+- daemon は、gateway が起動しないとき 10 秒おきに 3 回まで試し直し、gateway が途中で終了したら自分も終了する。
+  どちらも終了コード 2 で終わるので、常駐させる側（タスクスケジューラーから起動するスクリプトなど）は 2 のときだけ
+  起動し直せばよい。Windows のタスクの「失敗時に再起動」は、プログラムが 0 以外で終わっても働かない。
+- gateway は mDNS の通知なし（`--no-mdns`）で起動する。本体の WebSocket Gateway URL を直接設定している前提。
+  mDNS で本体に見つけさせたいときは `STACKCHAN_MDNS=1`。
 - gateway・VOICEVOX エンジンなどの子プロセスは Windows の Job オブジェクトに入れてあり、
   daemon が強制終了されても一緒に終了する（ポート 8765/8766/50021 を掴んだまま残らない）。
 

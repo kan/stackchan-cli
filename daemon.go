@@ -56,10 +56,50 @@ func cmdDaemon(args []string) error {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 	}
 	flush()
-	if err != nil {
+	switch {
+	case errors.Is(err, errGatewayStart), errors.Is(err, errGatewayLost):
+		os.Exit(daemonExitRestart)
+	case err != nil:
 		os.Exit(1)
 	}
 	return nil
+}
+
+// daemonExitRestart is the exit code for "start me again": the gateway did
+// not start or exited. start-daemon.vbs restarts the daemon on it (a Go panic
+// exits with 2 as well); other failures (another daemon running, a stop by
+// Stop-Process) exit with 1 and are not restarted. Task Scheduler's
+// restart-on-failure does not help here: it only covers a task that could not
+// be launched, not a non-zero exit code.
+const daemonExitRestart = 2
+
+// errGatewayLost marks a gateway that exited while the daemon was serving.
+var errGatewayLost = errors.New("gateway exited")
+
+// gatewayStartAttempts and gatewayRetryWait: a gateway that once did not
+// answer initialize within 20 s started in 3 s right after.
+const (
+	gatewayStartAttempts = 3
+	gatewayRetryWait     = 10 * time.Second
+)
+
+func gatewayLogPath() string { return filepath.Join(stackchanDir(), "gateway.log") }
+
+// openGatewayLog opens ~/.stackchan/gateway.log for the gateway's stderr,
+// so a failed start leaves its cause. Over 5 MB it moves to gateway.log.1.
+func openGatewayLog() (*os.File, error) {
+	path := gatewayLogPath()
+	if info, err := os.Stat(path); err == nil && info.Size() > 5<<20 {
+		_ = os.Rename(path, path+".1")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		fmt.Fprintf(f, "=== gateway start %s ===\n", time.Now().Format("2006-01-02 15:04:05.000"))
+	}
+	return f, err
 }
 
 type daemonOptions struct {
@@ -98,14 +138,10 @@ func runDaemon(opts daemonOptions) error {
 	// opening IPC, so clients fall back instead of queuing on a daemon that
 	// is not serving yet.
 	waitPortsFree([]string{":8765", ":8766"}, 15*time.Second)
-	ln, err := net.Listen("tcp", ipcAddr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", ipcAddr, err)
-	}
-	defer ln.Close()
 
 	// Voice commands: have the gateway POST screen-tap speech to us.
 	var voiceLn net.Listener
+	var err error
 	if opts.voice {
 		if user := os.Getenv("STACKCHAN_AUDIO_HOOK_URL"); user != "" {
 			fmt.Fprintf(os.Stderr, "daemon: STACKCHAN_AUDIO_HOOK_URL=%s is set; voice commands are off\n", user)
@@ -128,9 +164,99 @@ func runDaemon(opts daemonOptions) error {
 		}
 	}()
 
-	return withClient(opts.verbose, func(c *mcp.Client) error {
+	for attempt := 1; ; attempt++ {
+		err := serveWithGateway(opts, voiceLn, gatewayEnv)
+		if !errors.Is(err, errGatewayStart) || attempt == gatewayStartAttempts {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "daemon: %v; trying again in %s (see %s)\n", err, gatewayRetryWait, gatewayLogPath())
+		time.Sleep(gatewayRetryWait)
+		waitPortsFree([]string{":8765", ":8766"}, 15*time.Second)
+	}
+}
+
+// serveWithGateway starts one gateway and serves IPC on it until either
+// ends. IPC is open only for this attempt: between retries clients find no
+// daemon and fall back to a gateway of their own instead of waiting.
+func serveWithGateway(opts daemonOptions, voiceLn net.Listener, env []string) error {
+	ln, err := net.Listen("tcp", ipcAddr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", ipcAddr, err)
+	}
+	defer ln.Close()
+	stderr, closeLog := gatewayStderr(opts.verbose)
+	defer closeLog()
+	return withGateway(stderr, func(c *mcp.Client) error {
 		return serveDaemon(c, ln, voiceLn, opts)
-	}, gatewayEnv...)
+	}, env...)
+}
+
+// gatewayLogNoise is the gateway's line for every tool call: the session
+// watch alone makes one every 3 s (about 2.5 MB a day).
+const gatewayLogNoise = "Processing request of type"
+
+// dropLines writes the lines that do not contain drop. It is only written to
+// by the gateway's stderr copier (and flushed after the gateway exited), so
+// it needs no lock.
+//
+// It never fails: an error would stop the copier, nobody would read the
+// gateway's stderr any more, and the gateway would hang once the pipe is full.
+type dropLines struct {
+	w       io.Writer
+	drop    string
+	partial []byte
+}
+
+// dropLinesMax flushes output that never ends a line (a progress bar
+// redrawn with '\r'), so it neither grows without bound nor stays unwritten.
+const dropLinesMax = 64 << 10
+
+func (d *dropLines) Write(p []byte) (int, error) {
+	d.partial = append(d.partial, p...)
+	for {
+		i := bytes.IndexByte(d.partial, '\n')
+		if i < 0 {
+			if len(d.partial) > dropLinesMax {
+				d.Flush()
+			}
+			return len(p), nil
+		}
+		if line := d.partial[:i+1]; !bytes.Contains(line, []byte(d.drop)) {
+			_, _ = d.w.Write(line)
+		}
+		d.partial = d.partial[i+1:]
+	}
+}
+
+// Flush writes what is left without a final newline, e.g. the last words of
+// a gateway that crashed.
+func (d *dropLines) Flush() {
+	if len(d.partial) > 0 {
+		_, _ = d.w.Write(d.partial)
+		d.partial = nil
+	}
+}
+
+// gatewayStderr is where the daemon's gateway writes its log: gateway.log,
+// and the daemon's stderr too with --verbose. Call closeLog once the gateway
+// has exited.
+func gatewayStderr(verbose bool) (w io.Writer, closeLog func()) {
+	var ws []io.Writer
+	closeLog = func() {}
+	if f, err := openGatewayLog(); err == nil {
+		d := &dropLines{w: f, drop: gatewayLogNoise}
+		ws = append(ws, d)
+		closeLog = func() {
+			d.Flush()
+			_ = f.Close()
+		}
+	} else {
+		fmt.Fprintf(os.Stderr, "daemon: gateway log: %v\n", err)
+	}
+	if verbose {
+		ws = append(ws, os.Stderr)
+	}
+	return io.MultiWriter(ws...), closeLog
 }
 
 // serveDaemon serves IPC on ln and, when voiceLn is set, voice commands on it.
@@ -141,6 +267,26 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 	stop := make(chan struct{})
 	var stopOnce sync.Once
 	shutdown := func() { stopOnce.Do(func() { close(stop); ln.Close() }) }
+
+	// A gateway that exits leaves every command failing: end the daemon so
+	// start-daemon.vbs starts a new one with a new gateway.
+	lost := make(chan struct{})
+	go func() {
+		select {
+		case <-c.Done():
+			// Ctrl-C in a console reaches the gateway too, and it may exit
+			// before our handler runs: give the stop a moment to arrive.
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Second):
+			}
+			fmt.Fprintln(os.Stderr, "daemon: the gateway exited; stopping (see gateway.log)")
+			close(lost)
+			shutdown()
+		case <-stop:
+		}
+	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt)
@@ -179,6 +325,11 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
+			select { // lost first: it also closes stop
+			case <-lost:
+				return errGatewayLost
+			default:
+			}
 			select {
 			case <-stop:
 				return nil

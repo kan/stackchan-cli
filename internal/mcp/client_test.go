@@ -228,9 +228,19 @@ func TestGatewayClosingStdoutFailsTheCall(t *testing.T) {
 	c := newFakeClient(t, func(g *fakeGateway, req fakeRequest) {
 		_ = g.out.Close() // the gateway died without answering
 	})
+	select {
+	case <-c.Done():
+		t.Fatal("Done closed while the gateway is up")
+	default:
+	}
 	_, err := c.CallTool("get_status", nil)
 	if err == nil || !strings.Contains(err.Error(), "gateway closed stdout before responding") {
 		t.Fatalf("err = %v, want the closed-stdout error", err)
+	}
+	select {
+	case <-c.Done():
+	case <-time.After(2 * time.Second):
+		t.Error("Done not closed after the gateway closed its stdout")
 	}
 }
 

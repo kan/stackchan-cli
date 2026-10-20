@@ -6,6 +6,17 @@ import (
 	"testing"
 )
 
+func TestGatewayArgs(t *testing.T) {
+	t.Setenv("STACKCHAN_MDNS", "")
+	if got := gatewayArgs(); !reflect.DeepEqual(got, []string{"serve", "--no-mdns"}) {
+		t.Errorf("default = %v, want mDNS off", got)
+	}
+	t.Setenv("STACKCHAN_MDNS", "1")
+	if got := gatewayArgs(); !reflect.DeepEqual(got, []string{"serve"}) {
+		t.Errorf("STACKCHAN_MDNS=1: %v, want mDNS on", got)
+	}
+}
+
 func TestTokenize(t *testing.T) {
 	tests := []struct {
 		line string

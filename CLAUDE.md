@@ -433,9 +433,23 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 > 本節が最新。上の「stage-3 daemon + タッチ反応log」のポーリング方式、出力配線（`execMu` での直列化）、運用注意（ポート解放待ち）、v1.8.0 前提の記述は本節で置き換え。
 
 ### daemon の常駐方式（repo 外・この PC の設定）
-- タスクスケジューラ `StackchanDaemon`（ログオン時、失敗時 1 分間隔で 3 回再起動）が
+- タスクスケジューラ `StackchanDaemon`（ログオン時）が
   `wscript.exe ~/.stackchan/start-daemon.vbs` を実行 → 画面なしで `stackchan-cli.exe daemon` を起動し、
-  出力を `~/.stackchan/daemon.log` に追記（各行に時刻付き）。
+  出力を `~/.stackchan/daemon.log` に追記（各行に時刻付き）。gateway の出力は `~/.stackchan/gateway.log`
+  （起動時に 5MB を超えていれば `.1` に移す。3 秒ごとの「Processing request of type」の行は捨てる）。
+- **タスクの「失敗時に再起動」（1 分間隔で 3 回）は効かない**（2026-10-20 に使い捨てタスクで実測: 終了コード 1 で
+  終わっても再実行されない。タスク自体を起動できなかったときだけの設定）。代わりに:
+  - daemon は gateway が起動しない（`initialize` に答えない）とき、10 秒おきに 3 回まで自分で試し直す。
+    実行ファイルが無いなど、試し直しても直らない失敗は再試行しない（終了コード 1）。IPC の窓口は試すたびに
+    開いて閉じる（待ちの間、コマンドは単発の gateway に切り替わる）。
+  - `gateway.log` への書き込みの失敗は無視する（`dropLines`）。失敗を返すと gateway の stderr を読む処理が止まり、
+    パイプが詰まって gateway が止まるため。
+  - gateway が途中で終了したら（`mcp.Client.Done()`）、daemon も終了する（壊れたまま動き続けないように）。
+  - そのどちらも終了コード 2（`daemonExitRestart`。Go のパニックも 2）。`start-daemon.vbs` は 2 のときだけ 60 秒後に
+    起動し直す（15 分に 5 回を超えたらやめる）。`Stop-Process` による停止や「already running」は 2 ではないので、
+    起動し直さない（実測済み）。
+- gateway は `--no-mdns` で起動する（`STACKCHAN_MDNS=1` で戻せる）。mDNS の登録は毎回の起動に約 1.4 秒かかり
+  （約 3.1 秒 → 1.8 秒）、本体は URL を直接指定して繋ぐので使っていない。
 - 停止: **`Stop-ScheduledTask` では daemon が止まらない**（タスクが終わっても `stackchan-cli.exe daemon` は
   残る。実測）。one-shot や REPL のプロセスも同じ名前なので、コマンドラインで daemon を見分ける:
   `Get-CimInstance Win32_Process -Filter "Name='stackchan-cli.exe'" | Select ProcessId,CommandLine`。
@@ -607,7 +621,8 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 既定の音声ルール: 「明日の気温」「明日は雨」などの個別ルールのあとに「明日|あした」で明日の天気全体を答える
   （「明日は雨降る？」が今日の降水確率を答えないように）。既存の `voice-commands.txt` は上書きされないので手で足す。
 - 2026-10-20 12:07 に daemon の起動が `initialize: timed out after 20s`（gateway が 20 秒応答しない）で 1 回失敗した。
-  直後の再起動は約 3 秒で成功。原因は未調査。このときタスクスケジューラーの「失敗時の再起動」は 2 分待っても動かなかった。
+  直後の再起動は約 3 秒で成功。gateway の出力を捨てていたので原因は分からない（「強制終了の直後の起動」を 3 回
+  再現しても起きなかった）。対策は「daemon の常駐方式」の節（起動の再試行、gateway.log、--no-mdns、VBS の再起動）。
 
 ### 夜間の睡眠（2026-10-20）
 - 夜中に約 52 分おきに「なでる」（2〜6 秒）の誤検出が 2 回ずつ続き、反応していた（daemon.log で確認）。

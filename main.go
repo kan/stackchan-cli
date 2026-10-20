@@ -203,24 +203,45 @@ up to 90s for the StackChan to reconnect. Use 'daemon' or 'repl' for snappy cont
 // withClient boots a gateway, initializes the session, runs fn, then shuts down.
 // extraEnv is appended to the gateway's environment.
 func withClient(verbose bool, fn func(*mcp.Client) error, extraEnv ...string) error {
-	exe := gatewayPath()
-	env := append(gatewayEnv(), extraEnv...)
-
 	var stderr io.Writer
 	if verbose {
 		stderr = os.Stderr
 	}
+	return withGateway(stderr, fn, extraEnv...)
+}
 
-	c, err := mcp.Start(exe, []string{"serve"}, env, stderr)
+// errGatewayStart marks a gateway that started but did not answer
+// initialize: worth trying again (once it took over 20 s, and 3 s right
+// after). A gateway that cannot be launched at all (no executable) is not.
+var errGatewayStart = errors.New("gateway did not start")
+
+// withGateway is withClient with the gateway's stderr going to stderr (nil
+// discards it).
+func withGateway(stderr io.Writer, fn func(*mcp.Client) error, extraEnv ...string) error {
+	exe := gatewayPath()
+	env := append(gatewayEnv(), extraEnv...)
+
+	c, err := mcp.Start(exe, gatewayArgs(), env, stderr)
 	if err != nil {
 		return err
 	}
 	defer c.Close()
 
 	if err := c.Initialize(); err != nil {
-		return fmt.Errorf("initialize: %w", err)
+		return fmt.Errorf("%w: %w", errGatewayStart, err) // err reads "initialize: ..."
 	}
 	return fn(c)
+}
+
+// gatewayArgs runs the gateway without mDNS unless STACKCHAN_MDNS=1. Its
+// advertisement adds about 1.4 s to every start, can stall on a host with
+// many interfaces (per the gateway's own comments), and the device here
+// connects by its configured URL anyway.
+func gatewayArgs() []string {
+	if os.Getenv("STACKCHAN_MDNS") == "1" {
+		return []string{"serve"}
+	}
+	return []string{"serve", "--no-mdns"}
 }
 
 // withClientOrReuse runs fn against an existing client (REPL/daemon mode, c != nil) or
