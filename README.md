@@ -151,6 +151,14 @@ stackchan-cli say "やっほー"
   - gateway が音声を `STACKCHAN_AUDIO_HOOK_URL`（daemon が `127.0.0.1:8771` で受ける）へ送り、
     daemon が gateway の Python に入っている faster-whisper で文字にする。daemon はモデルを読み込んだ
     Python を常駐させるので、文字起こしは CPU で約 2 秒、GPU で約 0.2 秒。
+  - 短い発話は文脈が無く崩れやすい（「気温は」→「キヨンは」）ので、ルールのキーワードと「スタックチャン」を
+    文字起こしの手がかり（Whisper の initial prompt）として渡す。ルールを足せば手がかりも増える
+    （漢字の書き方だけ。ほかの語を含む組み合わせの語は省き、120 文字まで）。
+    手がかりの語を 3 つ以上並べただけの文字起こしは、Whisper が手がかりをそのまま返したものとみなし、
+    聞き取れなかった扱いにする。`STACKCHAN_STT_PROMPT=0` で手がかりを渡さない。
+  - 聞き取った音声と文字起こしの結果を、直近 30 件まで `~/.stackchan/voice-samples/` に残す
+    （`<時刻>.ogg` と `<時刻>.txt`。失敗は括弧書き。聞き取りの精度を実際のマイクの音で確かめるため。
+    PC の外には出さない）。`STACKCHAN_VOICE_SAMPLES=0` で残さない。
   - 話さずに試すには `stackchan-cli voice "笑って"`。ルールの一覧は `stackchan-cli voice`。`--voice=false` で無効。
 - daemon 稼働中は **one-shot も `repl` も `source` も**自動で IPC 転送される（その常駐 gateway を共有。
   `repl` は daemon があれば各行を転送、無ければ自前 gateway を起動）。転送したコマンドが失敗すると

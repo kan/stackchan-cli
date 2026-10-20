@@ -30,10 +30,13 @@ func TestSTTHelperProcess(t *testing.T) {
 	fmt.Println(`{"ready": true}`)
 	sc := bufio.NewScanner(os.Stdin)
 	for sc.Scan() {
-		var req struct{ Path string }
+		var req struct{ Path, Prompt string }
 		_ = json.Unmarshal(sc.Bytes(), &req)
 		audio, _ := os.ReadFile(req.Path)
 		switch string(audio) {
+		case "echo-prompt":
+			out, _ := json.Marshal(map[string]string{"text": "prompt=" + req.Prompt})
+			fmt.Println(string(out))
 		case "hang":
 			time.Sleep(time.Minute)
 		case "crash":
@@ -76,16 +79,31 @@ func helperWorker(t *testing.T, mode string) *sttWorker {
 
 func pidOf(text string) string { return text[strings.LastIndex(text, "pid"):] }
 
+// promptless is the audio and an empty prompt, for w.transcribe(promptless("...")).
+func promptless(audio string) ([]byte, string) { return []byte(audio), "" }
+
+// The prompt reaches the worker with the request.
+func TestSTTWorkerSendsPrompt(t *testing.T) {
+	w := helperWorker(t, "ok")
+	text, err := w.transcribe([]byte("echo-prompt"), "天気、気温。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, "prompt=天気、気温。") {
+		t.Errorf("text = %q, want the prompt echoed", text)
+	}
+}
+
 func TestSTTWorkerKeepsOneProcess(t *testing.T) {
 	w := helperWorker(t, "ok")
-	first, err := w.transcribe([]byte("hello"))
+	first, err := w.transcribe(promptless("hello"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(first, "heard hello") {
 		t.Errorf("text = %q", first)
 	}
-	second, err := w.transcribe([]byte("again"))
+	second, err := w.transcribe(promptless("again"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,11 +114,11 @@ func TestSTTWorkerKeepsOneProcess(t *testing.T) {
 
 func TestSTTWorkerErrorKeepsProcess(t *testing.T) {
 	w := helperWorker(t, "ok")
-	first, _ := w.transcribe([]byte("a"))
-	if _, err := w.transcribe([]byte("fail")); err == nil || !strings.Contains(err.Error(), "bad audio") {
+	first, _ := w.transcribe(promptless("a"))
+	if _, err := w.transcribe(promptless("fail")); err == nil || !strings.Contains(err.Error(), "bad audio") {
 		t.Errorf("err = %v, want the worker's error", err)
 	}
-	after, err := w.transcribe([]byte("b"))
+	after, err := w.transcribe(promptless("b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,10 +131,10 @@ func TestSTTWorkerErrorKeepsProcess(t *testing.T) {
 // stay in step with requests.
 func TestSTTWorkerKeepsRepliesInStep(t *testing.T) {
 	w := helperWorker(t, "ok")
-	if text, err := w.transcribe([]byte("silence")); err != nil || text != "" {
+	if text, err := w.transcribe(promptless("silence")); err != nil || text != "" {
 		t.Errorf("silence: text %q, err %v; want empty text", text, err)
 	}
-	text, err := w.transcribe([]byte("next"))
+	text, err := w.transcribe(promptless("next"))
 	if err != nil || !strings.HasPrefix(text, "heard next") {
 		t.Errorf("after silence: text %q, err %v; want the reply to this request", text, err)
 	}
@@ -124,11 +142,11 @@ func TestSTTWorkerKeepsRepliesInStep(t *testing.T) {
 
 func TestSTTWorkerRestartsAfterCrash(t *testing.T) {
 	w := helperWorker(t, "ok")
-	first, _ := w.transcribe([]byte("a"))
-	if _, err := w.transcribe([]byte("crash")); err == nil || !strings.Contains(err.Error(), "bad audio") {
+	first, _ := w.transcribe(promptless("a"))
+	if _, err := w.transcribe(promptless("crash")); err == nil || !strings.Contains(err.Error(), "bad audio") {
 		t.Errorf("err = %v, want the stderr tail", err)
 	}
-	after, err := w.transcribe([]byte("b"))
+	after, err := w.transcribe(promptless("b"))
 	if err != nil {
 		t.Fatalf("after a crash: %v", err)
 	}
@@ -140,17 +158,17 @@ func TestSTTWorkerRestartsAfterCrash(t *testing.T) {
 func TestSTTWorkerTimeout(t *testing.T) {
 	w := helperWorker(t, "ok")
 	w.timeout = 500 * time.Millisecond
-	if _, err := w.transcribe([]byte("hang")); err == nil || !strings.Contains(err.Error(), "no result within") {
+	if _, err := w.transcribe(promptless("hang")); err == nil || !strings.Contains(err.Error(), "no result within") {
 		t.Errorf("err = %v, want a timeout", err)
 	}
-	if _, err := w.transcribe([]byte("b")); err != nil {
+	if _, err := w.transcribe(promptless("b")); err != nil {
 		t.Errorf("after a timeout: %v", err)
 	}
 }
 
 func TestSTTWorkerStartFailure(t *testing.T) {
 	w := helperWorker(t, "crash-at-start")
-	_, err := w.transcribe([]byte("a"))
+	_, err := w.transcribe(promptless("a"))
 	if err == nil || !strings.Contains(err.Error(), "CUDA failed") {
 		t.Errorf("err = %v, want the start error from stderr", err)
 	}

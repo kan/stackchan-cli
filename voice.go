@@ -14,9 +14,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"stackchan-cli/internal/mcp"
 )
@@ -48,12 +50,12 @@ const defaultVoiceCommands = `# 音声コマンド: 画面をタップ → 話�
 悲しい|かなしい => avatar sad
 写真|しゃしん|撮って => say --face happy "撮るよ"; photo; say --face happy "撮ったよ"
 首振って|首ふって|くびふって => move-head --yaw -30 --pitch 45; sleep 500; move-head --yaw 30 --pitch 45; sleep 500; move-head --yaw 0 --pitch 45
-明日の気温|あしたの気温|明日の温度|あしたの温度 => say "{weather_temp_tomorrow}"
-明日の雨|あしたの雨|明日は雨|あしたは雨|明日雨|明日の降水確率|あしたの降水確率 => say "{weather_rain_tomorrow}"
+明日の気温|あしたの気温|明日の温度|あしたの温度|明日何度|明日は何度|あしたなんど => say "{weather_temp_tomorrow}"
+明日の雨|あしたの雨|明日は雨|あしたは雨|明日雨|明日の降水確率|あしたの降水確率|明日傘|明日は傘|明日の傘|明日かさ|あしたかさ => say "{weather_rain_tomorrow}"
 明日|あした => say "{weather_tomorrow}"
 天気だけ|てんきだけ => say "{weather_sky}"
-気温|温度 => say "{weather_temp}"
-雨|降水確率|傘 => say "{weather_rain}"
+気温|温度|何度|なんど|きおん => say "{weather_temp}"
+雨|降水確率|傘|かさ => say "{weather_rain}"
 天気|てんき => say "{weather}"
 何時|なんじ|何日|なんにち|日付 => say "{date}、{weekday}、{time}です"
 * => say --face sad "ごめんね、わからなかった"; sleep 2000; avatar embarrassed
@@ -67,6 +69,74 @@ type voiceRule struct {
 type voiceRules struct {
 	rules    []voiceRule
 	fallback []string // the "*" rule; nil when there is none
+	words    []string // keywords for the recognizer's prompt, each once (see sttPrompt)
+}
+
+// sttPromptMaxRunes keeps the prompt well inside what whisper uses: it keeps
+// only the last ~223 tokens of a prompt, and a kanji can take 2 or more, so
+// a longer prompt would silently lose its start.
+const sttPromptMaxRunes = 120
+
+// sttPrompt is the text given to the speech recognizer as its initial
+// prompt: the name StackChan is called by and the rules' keywords. A short
+// utterance has little context, and whisper then drifts to common phrases
+// (気温は → キヨンは, → お疲れ様); the prompt steers it to the words the rules
+// listen for. Keywords past sttPromptMaxRunes are left out. "" when there
+// are no rules.
+func (vr voiceRules) sttPrompt() string {
+	if len(vr.words) == 0 {
+		return ""
+	}
+	p := "スタックチャン"
+	for _, w := range vr.words {
+		// A compound (明日の気温, 天気だけ) adds nothing when its parts are there.
+		if slices.ContainsFunc(vr.words, func(o string) bool { return o != w && strings.Contains(w, o) }) {
+			continue
+		}
+		if utf8.RuneCountInString(p)+1+utf8.RuneCountInString(w) > sttPromptMaxRunes-1 {
+			break
+		}
+		p += "、" + w
+	}
+	return p + "。"
+}
+
+// promptWords picks a rule's keywords for the prompt: the ones written with
+// kanji (天気, not its reading てんき, which only repeats it), or the first
+// keyword when all are kana.
+func promptWords(keywords []string) []string {
+	var words []string
+	for _, k := range keywords {
+		if strings.IndexFunc(k, func(r rune) bool { return !isKana(r) }) >= 0 {
+			words = append(words, k)
+		}
+	}
+	if len(words) == 0 && len(keywords) > 0 {
+		words = keywords[:1]
+	}
+	return words
+}
+
+func isKana(r rune) bool { return r >= 'ぁ' && r <= 'ゖ' || r >= 'ァ' && r <= 'ヺ' || r == 'ー' }
+
+// isPromptEcho reports whether heard is only a piece of the prompt listing
+// several of its words: whisper sometimes returns its prompt for silence or
+// a mumble, and the keywords in it would then run a rule nobody asked for.
+// A real request names one or two ("スタックチャン、笑って"), so it takes
+// three words besides the name.
+func isPromptEcho(heard, prompt string) bool {
+	h := normalizeSpeech(heard)
+	if h == "" || !strings.Contains(normalizeSpeech(prompt), h) {
+		return false
+	}
+	words := strings.FieldsFunc(prompt, func(r rune) bool { return r == '、' || r == '。' })
+	n := 0
+	for _, w := range words[min(1, len(words)):] { // words[0] is the name
+		if strings.Contains(h, normalizeSpeech(w)) {
+			n++
+		}
+	}
+	return n >= 3
 }
 
 // parseVoiceRules reads the voice-commands.txt format (see defaultVoiceCommands).
@@ -91,14 +161,20 @@ func parseVoiceRules(text string) (voiceRules, error) {
 			vr.fallback = commands
 			continue
 		}
-		var keywords []string
+		var keywords, written []string
 		for k := range strings.SplitSeq(lhs, "|") {
 			if n := normalizeSpeech(k); n != "" {
 				keywords = append(keywords, n)
+				written = append(written, strings.TrimSpace(k))
 			}
 		}
 		if len(keywords) == 0 {
 			return vr, fmt.Errorf("line %d: no keyword before =>", i)
+		}
+		for _, w := range promptWords(written) {
+			if !slices.Contains(vr.words, w) {
+				vr.words = append(vr.words, w)
+			}
 		}
 		vr.rules = append(vr.rules, voiceRule{keywords: keywords, commands: commands})
 	}
@@ -281,9 +357,11 @@ func lastLine(s string) string {
 // a time; one more waits, and further ones are dropped (the device cannot
 // listen while we transcribe, so this only happens when transcribing stalls).
 type voiceHook struct {
-	transcribe func(audio []byte) (string, error)
-	run        func(heard string) // runVoice in the daemon
-	face       func(name string)  // set_avatar; shows thinking while transcribing
+	transcribe func(audio []byte, prompt string) (string, error)
+	prompt     func() string                    // voiceSTTPrompt; nil gives none
+	run        func(heard string)               // runVoice in the daemon
+	face       func(name string)                // set_avatar; shows thinking while transcribing
+	keep       func(audio []byte, heard string) // saveVoiceSample; nil keeps nothing
 	jobs       chan []byte
 }
 
@@ -293,8 +371,14 @@ func newVoiceHook(c *mcp.Client) *voiceHook {
 	e := cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr}
 	stt := newSTTWorker()
 	go stt.warm()
+	var keep func([]byte, string)
+	if os.Getenv("STACKCHAN_VOICE_SAMPLES") != "0" {
+		keep = saveVoiceSample
+	}
 	return &voiceHook{
 		transcribe: stt.transcribe,
+		prompt:     voiceSTTPrompt,
+		keep:       keep,
 		run: func(heard string) {
 			if err := runVoice(heard, e); err != nil {
 				fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
@@ -347,19 +431,93 @@ func (h *voiceHook) process(stop <-chan struct{}) {
 			// device does not delay it.
 			thinking := make(chan struct{})
 			go func() { defer close(thinking); h.face("thinking") }()
-			heard, err := h.transcribe(audio)
+			prompt := ""
+			if h.prompt != nil {
+				prompt = h.prompt()
+			}
+			heard, err := h.transcribe(audio, prompt)
 			<-thinking
 			// Back to the rest face before the commands, so a rule that sets no face
 			// does not leave the thinking one.
 			h.face(restFace)
-			if err != nil {
+			saved := heard
+			switch {
+			case err != nil:
 				// Run the * rule as for nothing heard, so the failure shows on
 				// the device too.
 				fmt.Fprintf(os.Stderr, "daemon: voice: %v\n", err)
-				heard = ""
+				heard, saved = "", "(error: "+err.Error()+")"
+			case isPromptEcho(heard, prompt):
+				fmt.Fprintf(os.Stderr, "daemon: voice: heard %q is the recognizer's prompt echoed; treating it as nothing heard\n", heard)
+				heard, saved = "", "(prompt echoed: "+heard+")"
+			}
+			if h.keep != nil {
+				go h.keep(audio, saved) // diagnostics only: do not delay the reply
 			}
 			h.run(heard)
 		}
+	}
+}
+
+// voiceSTTPrompt is the recognizer's prompt from the current rules, or ""
+// with STACKCHAN_STT_PROMPT=0 (or no rules).
+func voiceSTTPrompt() string {
+	if os.Getenv("STACKCHAN_STT_PROMPT") == "0" {
+		return ""
+	}
+	vr, err := loadVoiceRules()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: voice: no recognizer prompt: %v\n", err)
+		return ""
+	}
+	return vr.sttPrompt()
+}
+
+func voiceSamplesDir() string { return filepath.Join(stackchanDir(), "voice-samples") }
+
+// voiceSamplesKept is how many recent utterances saveVoiceSample keeps.
+const voiceSamplesKept = 30
+
+// saveVoiceSample keeps the audio of an utterance (<time>.ogg) and what was
+// heard in it (<time>.txt; an error or an echoed prompt is noted in
+// parentheses) in ~/.stackchan/voice-samples, the most recent
+// voiceSamplesKept, so recognition can be checked and tuned against the
+// device's real microphone. STACKCHAN_VOICE_SAMPLES=0 turns it off.
+// Failures are only logged.
+func saveVoiceSample(audio []byte, heard string) {
+	dir := voiceSamplesDir()
+	base := filepath.Join(dir, time.Now().Format("20060102-150405.000"))
+	err := os.MkdirAll(dir, 0o755)
+	if err == nil {
+		err = os.WriteFile(base+".ogg", audio, 0o644)
+	}
+	if err == nil {
+		err = os.WriteFile(base+".txt", []byte(heard+"\n"), 0o644)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: voice: keep sample: %v\n", err)
+		return
+	}
+	pruneVoiceSamples(dir, voiceSamplesKept)
+}
+
+// pruneVoiceSamples removes all but the newest keep samples (names sort by
+// time), counting a sample by its name whether its .ogg, its .txt or both
+// are left.
+func pruneVoiceSamples(dir string, keep int) {
+	files, _ := filepath.Glob(filepath.Join(dir, "*"))
+	var bases []string
+	for _, f := range files {
+		if ext := filepath.Ext(f); ext == ".ogg" || ext == ".txt" {
+			if b := strings.TrimSuffix(f, ext); !slices.Contains(bases, b) {
+				bases = append(bases, b)
+			}
+		}
+	}
+	slices.Sort(bases)
+	for _, b := range bases[:max(0, len(bases)-keep)] {
+		_ = os.Remove(b + ".ogg")
+		_ = os.Remove(b + ".txt")
 	}
 }
 

@@ -21,7 +21,7 @@ import (
 
 // sttWorkerScript runs in the gateway's Python, which has faster-whisper and
 // the model, with the settings of the gateway's listen (whisperEnv). It
-// answers each request line {"path": ...} with one line {"text": ...} or
+// answers each request line {"path": ..., "prompt": ...} with one line {"text": ...} or
 // {"error": ...}, after a first {"ready": true, "device": ...} once the model
 // is loaded. It exits at EOF.
 //
@@ -52,7 +52,9 @@ def reply(obj):
 reply({**ready, "device": device + "/" + compute_type})
 for line in sys.stdin:
     try:
-        segments, _ = m.transcribe(json.loads(line)["path"], language="ja", beam_size=1, vad_filter=False)
+        req = json.loads(line)
+        segments, _ = m.transcribe(req["path"], language="ja", beam_size=1, vad_filter=False,
+                                   initial_prompt=req.get("prompt") or None)
         reply({"text": "".join(s.text for s in segments).strip()})
     except Exception as e:
         reply({"error": f"{type(e).__name__}: {e}"})
@@ -158,8 +160,9 @@ func (w *sttWorker) warm() {
 	}
 }
 
-// transcribe turns Ogg/Opus audio into text.
-func (w *sttWorker) transcribe(audio []byte) (string, error) {
+// transcribe turns Ogg/Opus audio into text. prompt ("" for none) is
+// whisper's initial prompt: words to expect (see voiceRules.sttPrompt).
+func (w *sttWorker) transcribe(audio []byte, prompt string) (string, error) {
 	f, err := os.CreateTemp(stackchanDir(), "voice-*.ogg")
 	if err != nil {
 		return "", err
@@ -175,7 +178,7 @@ func (w *sttWorker) transcribe(audio []byte) (string, error) {
 	if err := w.ensureStarted(); err != nil {
 		return "", err
 	}
-	req, _ := json.Marshal(map[string]string{"path": f.Name()})
+	req, _ := json.Marshal(map[string]string{"path": f.Name(), "prompt": prompt})
 	if _, err := w.stdin.Write(append(req, '\n')); err != nil {
 		w.stop()
 		return "", fmt.Errorf("transcribe: %v", err)

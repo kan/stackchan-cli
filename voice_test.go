@@ -3,14 +3,17 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func TestNormalizeSpeech(t *testing.T) {
@@ -119,6 +122,97 @@ func TestDefaultVoiceCommandsParse(t *testing.T) {
 	if got, _ := vr.match("いま何時？"); !reflect.DeepEqual(got, []string{`say "{date}、{weekday}、{time}です"`}) {
 		t.Errorf("いま何時？ -> %q", got)
 	}
+	// What the device's microphone gave (2026-10-20), and the weather rule
+	// each should reach.
+	for heard, want := range map[string]string{
+		"今日の天気は":   `say "{weather}"`,
+		"いまなんど":    `say "{weather_temp}"`,
+		"今何度？":     `say "{weather_temp}"`,
+		"カサイル?":    `say "{weather_rain}"`,
+		"明日は雨降る？":  `say "{weather_rain_tomorrow}"`,
+		"明日暑いかな":   `say "{weather_tomorrow}"`,
+		"明日何度？":    `say "{weather_temp_tomorrow}"`,
+		"明日傘いる？":   `say "{weather_rain_tomorrow}"`,
+		"かさ、いるかな?": `say "{weather_rain}"`,
+	} {
+		if got, _ := vr.match(heard); !reflect.DeepEqual(got, []string{want}) {
+			t.Errorf("%s -> %q, want %q", heard, got, want)
+		}
+	}
+}
+
+// The recognizer's prompt lists each keyword once, as written.
+func TestSTTPrompt(t *testing.T) {
+	vr, err := parseVoiceRules("天気|てんき => say a\n天気だけ|天気 => say b\n* => say c\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Kanji forms only (てんき just repeats 天気), and no compound whose part
+	// is there (天気だけ); a kana-only rule keeps its first.
+	if got, want := vr.sttPrompt(), "スタックチャン、天気。"; got != want {
+		t.Errorf("prompt = %q, want %q", got, want)
+	}
+	if got := (voiceRules{}).sttPrompt(); got != "" {
+		t.Errorf("no rules: prompt = %q, want none", got)
+	}
+	vr, _ = parseVoiceRules("わらって|にこにこ => avatar happy\n")
+	if got, want := vr.sttPrompt(), "スタックチャン、わらって。"; got != want {
+		t.Errorf("kana-only rule: prompt = %q, want %q", got, want)
+	}
+
+	// The defaults fit, down to the last rule's words.
+	vr, _ = parseVoiceRules(defaultVoiceCommands)
+	if p := vr.sttPrompt(); utf8.RuneCountInString(p) > sttPromptMaxRunes || !strings.Contains(p, "日付") {
+		t.Errorf("default prompt %q (%d runes): over %d, or the last words cut", p, utf8.RuneCountInString(p), sttPromptMaxRunes)
+	}
+	// A long rules file is cut to the cap.
+	var long strings.Builder
+	for i := range 60 {
+		fmt.Fprintf(&long, "語%02d|", i)
+	}
+	long.WriteString("x => say a\n")
+	vr, _ = parseVoiceRules(long.String())
+	if p := vr.sttPrompt(); utf8.RuneCountInString(p) > sttPromptMaxRunes || !strings.HasPrefix(p, "スタックチャン") {
+		t.Errorf("long rules: prompt %q (%d runes)", p, utf8.RuneCountInString(p))
+	}
+}
+
+func TestIsPromptEcho(t *testing.T) {
+	prompt := "スタックチャン、笑って、悲しい、写真、天気、気温。"
+	for heard, want := range map[string]bool{
+		"スタックチャン、笑って、悲しい、写真": true, // the prompt given back
+		"笑って、悲しい、写真、天気":      true,
+		"天気":          false, // real requests
+		"今日の天気は":      false,
+		"スタックチャン、笑って": false,
+		"笑って、悲しい":     false,
+	} {
+		if got := isPromptEcho(heard, prompt); got != want {
+			t.Errorf("isPromptEcho(%q) = %v, want %v", heard, got, want)
+		}
+	}
+}
+
+// Only the newest samples are kept, each audio with its text.
+func TestPruneVoiceSamples(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"20261020-130000.000", "20261020-130001.000", "20261020-130002.000"} {
+		for _, ext := range []string{".ogg", ".txt"} {
+			if err := os.WriteFile(filepath.Join(dir, name+ext), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	pruneVoiceSamples(dir, 2)
+	left, _ := filepath.Glob(filepath.Join(dir, "*"))
+	var names []string
+	for _, f := range left {
+		names = append(names, filepath.Base(f))
+	}
+	want := []string{"20261020-130001.000.ogg", "20261020-130001.000.txt", "20261020-130002.000.ogg", "20261020-130002.000.txt"}
+	if !reflect.DeepEqual(names, want) {
+		t.Errorf("left %v, want %v", names, want)
+	}
 }
 
 // runVoice reads the user's rules file and runs the matched commands.
@@ -177,11 +271,12 @@ func TestVoiceRuleCannotCallVoice(t *testing.T) {
 // A failed transcription runs the * rule (as for nothing heard), so the
 // failure shows on the device.
 func TestVoiceHookRunsFallbackOnTranscribeError(t *testing.T) {
-	heard := make(chan string, 1)
+	heard, kept := make(chan string, 1), make(chan string, 1)
 	h := &voiceHook{
-		transcribe: func([]byte) (string, error) { return "", errors.New("no python") },
+		transcribe: func([]byte, string) (string, error) { return "", errors.New("no python") },
 		run:        func(text string) { heard <- text },
 		face:       func(string) {},
+		keep:       func(_ []byte, text string) { kept <- text },
 		jobs:       make(chan []byte, 1),
 	}
 	stop := make(chan struct{})
@@ -195,6 +290,33 @@ func TestVoiceHookRunsFallbackOnTranscribeError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("nothing was run after the transcription failed")
+	}
+	// The sample notes the error, so it does not look like silence.
+	if text := <-kept; !strings.Contains(text, "no python") {
+		t.Errorf("kept %q, want the error", text)
+	}
+}
+
+// A transcript that is only the prompt given back runs the * rule, not
+// the rules its keywords would match.
+func TestVoiceHookIgnoresEchoedPrompt(t *testing.T) {
+	heard := make(chan string, 1)
+	prompt := "スタックチャン、笑って、悲しい、写真。"
+	h := &voiceHook{
+		transcribe: func([]byte, string) (string, error) {
+			return "スタックチャン、笑って、悲しい、写真", nil
+		},
+		prompt: func() string { return prompt },
+		run:    func(text string) { heard <- text },
+		face:   func(string) {},
+		jobs:   make(chan []byte, 1),
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go h.process(stop)
+	h.jobs <- []byte("OggS")
+	if text := <-heard; text != "" {
+		t.Errorf("run(%q), want run(\"\")", text)
 	}
 }
 
@@ -245,7 +367,7 @@ func TestVoiceHookTranscribesAndRuns(t *testing.T) {
 	step := func(s string) { mu.Lock(); steps = append(steps, s); mu.Unlock() }
 	thinkingShown := make(chan struct{})
 	h := &voiceHook{
-		transcribe: func(audio []byte) (string, error) {
+		transcribe: func(audio []byte, _ string) (string, error) {
 			<-thinkingShown // make the order deterministic for the check below
 			gotAudio = audio
 			step("transcribe")
