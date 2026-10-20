@@ -231,3 +231,44 @@ func TestWhisperEnv(t *testing.T) {
 		t.Errorf("overrode the user's settings:\n%s", env)
 	}
 }
+
+// skip_click in the worker script drops the device's click at the start of a
+// recording, and nothing else. It needs numpy, so it runs in the gateway's
+// Python when that is installed (not in CI).
+func TestSTTWorkerSkipsClick(t *testing.T) {
+	py := sttPython()
+	if py == "" {
+		t.Skip("no gateway Python")
+	}
+	start := strings.Index(sttWorkerScript, "def skip_click")
+	end := strings.Index(sttWorkerScript, "def load")
+	if start < 0 || end < start {
+		t.Fatal("skip_click not found in sttWorkerScript")
+	}
+	if exec.Command(py, "-I", "-c", "import numpy").Run() != nil {
+		t.Skip("the gateway Python has no numpy")
+	}
+	// 100 ms blocks at 16 kHz with the given RMS (a constant signal of that level).
+	probe := "import numpy as np\n" + sttWorkerScript[start:end] + `
+def audio(*levels):
+    return np.concatenate([np.full(1600, v, dtype=np.float32) for v in levels])
+speech = [0.03] * 10
+cases = [
+    audio(0.003, 0.07, 0.24, 0.42, 0.007, *speech),  # click, quiet: cut at 0.4 s
+    audio(0.05, 0.05, 0.24, 0.42, 0.013, *speech),   # sound before the tap (a video playing), then the click
+    audio(*speech),                                  # no click
+    audio(0.25, 0.3, 0.3, 0.3, 0.3, *speech),        # loud speech, no quiet after it
+    audio(0.003, 0.25, 0.25, 0.005, 0.25, 0.2, *speech),  # loud speech with a pause: as loud after it
+    audio(0.25, 0.04, 0.04, 0.3, 0.005, *speech),    # loud but not over in time, then the click
+    audio(0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.01, 0.3, 0.001, *speech),  # loud later than 0.6 s
+]
+print(" ".join(str(skip_click(c)[1]) for c in cases))
+`
+	out, err := exec.Command(py, "-I", "-c", probe).CombinedOutput()
+	if err != nil {
+		t.Fatalf("probe failed (%v): %s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "6400 6400 0 0 0 6400 0"; got != want {
+		t.Errorf("samples cut = %s, want %s", got, want)
+	}
+}

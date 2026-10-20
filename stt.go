@@ -31,6 +31,24 @@ import (
 const sttWorkerScript = `import json, os, sys
 import numpy as np
 from faster_whisper import WhisperModel
+from faster_whisper.audio import decode_audio
+def skip_click(a):
+    # The device's recordings start with a loud click about 0.2-0.4 s in
+    # (peak RMS ~0.55 over 20 ms, 5-30 times what follows), then quiet.
+    # Whisper turns it into words ("いいよ、いいよ" for 調子どう), so start
+    # after it. It is a click only when it is loud, within the first 0.6 s,
+    # over within 0.3 s (60 ms below 0.02) and at least 3 times louder than
+    # anything after it; loud speech is none of these. Returns the audio and
+    # the samples skipped.
+    f = 320  # 20 ms at 16 kHz
+    rms = np.array([np.sqrt(np.mean(a[i:i + f] ** 2)) for i in range(0, len(a) - f + 1, f)])
+    for i in np.flatnonzero(rms[:30] >= 0.2):
+        for j in range(i + 1, min(i + 16, len(rms) - 2)):
+            if (rms[j:j + 3] < 0.02).all():
+                if rms[i:j].max() >= 3 * rms[j:].max():
+                    return a[j * f:], j * f
+                break
+    return a, 0
 def load(device, compute_type):
     m = WhisperModel(os.environ["STACKCHAN_FASTER_WHISPER_MODEL"], device=device, compute_type=compute_type)
     list(m.transcribe(np.zeros(16000, dtype=np.float32), language="ja", beam_size=1)[0])
@@ -53,9 +71,10 @@ reply({**ready, "device": device + "/" + compute_type})
 for line in sys.stdin:
     try:
         req = json.loads(line)
-        segments, _ = m.transcribe(req["path"], language="ja", beam_size=1, vad_filter=False,
+        audio, skipped = skip_click(decode_audio(req["path"], sampling_rate=16000))
+        segments, _ = m.transcribe(audio, language="ja", beam_size=1, vad_filter=False,
                                    initial_prompt=req.get("prompt") or None)
-        reply({"text": "".join(s.text for s in segments).strip()})
+        reply({"text": "".join(s.text for s in segments).strip(), "skipped_ms": skipped // 16})
     except Exception as e:
         reply({"error": f"{type(e).__name__}: {e}"})
 `
@@ -65,6 +84,7 @@ type sttReply struct {
 	Device   string `json:"device"`   // with ready: what the model runs on
 	Fallback string `json:"fallback"` // with ready: why the GPU was not used
 	Text     string `json:"text"`
+	Skipped  int    `json:"skipped_ms"` // with text: the device's click cut from the start
 	Error    string `json:"error"`
 }
 
@@ -189,6 +209,9 @@ func (w *sttWorker) transcribe(audio []byte, prompt string) (string, error) {
 	}
 	if r.Error != "" {
 		return "", fmt.Errorf("transcribe: %s", r.Error)
+	}
+	if r.Skipped > 0 {
+		fmt.Fprintf(os.Stderr, "daemon: voice: skipped the device's click (first %d ms)\n", r.Skipped)
 	}
 	return r.Text, nil
 }
