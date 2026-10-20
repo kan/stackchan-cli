@@ -633,15 +633,29 @@ func cmdSay(args []string, e cmdEnv) error {
 	if *speaker > 0 {
 		sayArgs["speaker_id"] = *speaker
 	}
-	// Start the engine while a one-shot gateway waits for the device.
+	// Start the engine, and fetch the weather if the text asks for it, while a
+	// one-shot gateway waits for the device.
 	engineReady := make(chan error, 1)
 	go func() { engineReady <- ensureVoicevox() }()
+	// Its notes are written by this command's goroutine, not alongside it.
+	type filled struct{ text, notes string }
+	weatherText := make(chan filled, 1)
+	go func() {
+		var notes strings.Builder
+		t, err := expandWeather(text, time.Now(), &notes)
+		if err != nil {
+			fmt.Fprintf(&notes, "warning: %v\n", err)
+		}
+		weatherText <- filled{t, notes.String()}
+	}()
 	return withDevice(*verbose, e.c, func(c *mcp.Client) error {
 		if err := <-engineReady; err != nil {
 			fmt.Fprintf(e.errOut, "warning: %v\n", err)
 		}
+		w := <-weatherText
+		fmt.Fprint(e.errOut, w.notes)
 		// Filled in now, not before a one-shot gateway waited for the device.
-		sayArgs["text"] = expandSayVars(text, time.Now())
+		sayArgs["text"] = expandSayVars(w.text, time.Now())
 		if _, err := callTool(c, "say", sayArgs, e.out); err != nil {
 			return err
 		}

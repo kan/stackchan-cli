@@ -39,12 +39,22 @@ const defaultVoiceCommands = `# 音声コマンド: 画面をタップ → 話�
 #   記号と空白は取り除く（キーワードも同じようにそろえる）。
 # - コマンドは REPL と同じ（avatar / say / move-head / photo / sleep / all-leds ...）。
 #   say の文の {date} {weekday} {time} は、その時の日付・曜日・時刻（例: 2026年10月17日、土曜日、22時40分）になる。
+#   {weather} は今日の天気・気温・降水確率の文、{weather_sky} は天気だけ、{weather_temp} は気温だけ、
+#   {weather_rain} は降水確率だけ。末尾に _tomorrow を付けると明日の分（例: {weather_temp_tomorrow}）。
+#   地域は ~/.stackchan/weather.txt に書く。
 # - 保存すれば次の聞き取りから反映される（再起動は要らない）。
 # - stackchan-cli voice "笑って" で、話さずに試せる。stackchan-cli voice だけなら一覧を表示する。
 笑って|わらって|にこにこ => avatar happy
 悲しい|かなしい => avatar sad
 写真|しゃしん|撮って => say --face happy "撮るよ"; photo; say --face happy "撮ったよ"
 首振って|首ふって|くびふって => move-head --yaw -30 --pitch 45; sleep 500; move-head --yaw 30 --pitch 45; sleep 500; move-head --yaw 0 --pitch 45
+明日の気温|あしたの気温|明日の温度|あしたの温度 => say "{weather_temp_tomorrow}"
+明日の雨|あしたの雨|明日は雨|あしたは雨|明日雨|明日の降水確率|あしたの降水確率 => say "{weather_rain_tomorrow}"
+明日|あした => say "{weather_tomorrow}"
+天気だけ|てんきだけ => say "{weather_sky}"
+気温|温度 => say "{weather_temp}"
+雨|降水確率|傘 => say "{weather_rain}"
+天気|てんき => say "{weather}"
 何時|なんじ|何日|なんにち|日付 => say "{date}、{weekday}、{time}です"
 * => say --face sad "ごめんね、わからなかった"; sleep 2000; avatar embarrassed
 `
