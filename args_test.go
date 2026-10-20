@@ -137,6 +137,22 @@ func TestParseCallArgs(t *testing.T) {
 	}
 }
 
+// After "--" everything is positional, even what looks like a flag.
+func TestParseInterspersedStopsAtDashDash(t *testing.T) {
+	set, _ := fs("t")
+	quiet := set.Bool("quiet", false, "")
+	pos, err := parseInterspersed(set, []string{"3m", "--", "--quiet", "x"})
+	if err != nil || !reflect.DeepEqual(pos, []string{"3m", "--quiet", "x"}) || *quiet {
+		t.Errorf("pos = %q, quiet %v, %v", pos, *quiet, err)
+	}
+	set, _ = fs("t")
+	quiet = set.Bool("quiet", false, "")
+	pos, err = parseInterspersed(set, []string{"3m", "--quiet", "5m"})
+	if err != nil || !reflect.DeepEqual(pos, []string{"3m", "5m"}) || !*quiet {
+		t.Errorf("pos = %q, quiet %v, %v", pos, *quiet, err)
+	}
+}
+
 func TestParseStatus(t *testing.T) {
 	tests := []struct {
 		text          string

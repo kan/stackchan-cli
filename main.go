@@ -46,6 +46,10 @@ type cmdEnv struct {
 // stdEnv writes to the terminal (one-shot and REPL).
 func stdEnv(c *mcp.Client) cmdEnv { return cmdEnv{c: c, out: os.Stdout, errOut: os.Stderr} }
 
+// logEnv writes to the daemon log (what the daemon does on its own: touch
+// reactions, sleep, voice commands, notices).
+func logEnv(c *mcp.Client) cmdEnv { return cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr} }
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -129,6 +133,10 @@ func dispatch(cmd string, args []string, e cmdEnv) error {
 		return cmdVoice(args, e)
 	case "pc":
 		return cmdPC(args, e)
+	case "timer":
+		return cmdTimer(args, e)
+	case "pomodoro":
+		return cmdPomodoro(args, e)
 	case "photo":
 		return cmdPhoto(args, e)
 	case "call":
@@ -180,6 +188,14 @@ Commands:
                          (the daemon runs them on speech: tap the screen, speak, tap again)
   pc                     show this PC's CPU, memory and disk space, and what say's {pc}
                          would say (settings: ~/.stackchan/pc-monitor.txt)
+  timer <dur> [--quiet]  start a timer (3m, 1h30m, 90s, 3分); speaks when it is up (needs the daemon)
+  timer [--say]          list the timers and the pomodoro (--say: speak it)
+  timer cancel           cancel the timers (not the pomodoro)
+  pomodoro start [--work 25m --break 5m --long 15m --every 4]
+                         work, then a break (every 4th long), round and round; LEDs show
+                         the time left; the end of work waits for a head touch or pomodoro ok
+  pomodoro stop | ok     stop it | answer the end of work (start the break)
+  pomodoro               show what it is doing
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
   sleep                  sleep until wakeup, whatever the time: touch sensor off,
@@ -842,26 +858,43 @@ func cmdCall(args []string, e cmdEnv) error {
 	return callAndPrint(verbose, true, tool, toolArgs, e)
 }
 
+// parseInterspersed parses flags before and after the positional arguments
+// (`timer 3m --quiet`, `call <tool> --json ...`) and returns the positional
+// ones: flag parsing stops at the first non-flag, so it parses again after
+// each one. After "--" everything is positional.
+func parseInterspersed(set *flag.FlagSet, args []string) (pos []string, err error) {
+	for {
+		if err := set.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := set.Args()
+		if len(rest) == 0 {
+			return pos, nil
+		}
+		if len(args) > len(rest) && args[len(args)-len(rest)-1] == "--" {
+			return append(pos, rest...), nil
+		}
+		pos = append(pos, rest[0])
+		args = rest[1:]
+	}
+}
+
 // parseCallArgs reads `call` arguments: a tool name and --json, in either order.
 func parseCallArgs(args []string) (tool string, toolArgs map[string]any, verbose bool, err error) {
 	set, verboseFlag := fs("call")
 	jsonArgs := set.String("json", "{}", "tool arguments as a JSON object")
-	// Flags may come before and after the tool name (the usage writes
-	// call <tool> --json ...), but flag parsing stops at the first non-flag,
-	// so parse again after taking the name off.
-	if err := set.Parse(args); err != nil {
+	// Flags may come before and after the tool name (call <tool> --json ...).
+	pos, err := parseInterspersed(set, args)
+	if err != nil {
 		return "", nil, false, err
 	}
-	if set.NArg() < 1 {
+	if len(pos) < 1 {
 		return "", nil, false, fmt.Errorf("call requires a tool name")
 	}
-	tool = set.Arg(0)
-	if err := set.Parse(set.Args()[1:]); err != nil {
-		return "", nil, false, err
+	if len(pos) > 1 {
+		return "", nil, false, fmt.Errorf("call: unexpected arguments %q (put tool arguments in --json)", pos[1:])
 	}
-	if set.NArg() > 0 {
-		return "", nil, false, fmt.Errorf("call: unexpected arguments %q (put tool arguments in --json)", set.Args())
-	}
+	tool = pos[0]
 	if err := json.Unmarshal([]byte(*jsonArgs), &toolArgs); err != nil {
 		return "", nil, false, fmt.Errorf("--json: %w", err)
 	}
@@ -1094,6 +1127,8 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("listen", readline.PcItem("--sec"), readline.PcItem("--lang"), readline.PcItem("--model"), readline.PcItem("--motion")),
 		readline.PcItem("voice"),
 		readline.PcItem("pc"),
+		readline.PcItem("timer", readline.PcItem("cancel"), readline.PcItem("--say"), readline.PcItem("--quiet")),
+		readline.PcItem("pomodoro", readline.PcItem("start"), readline.PcItem("stop"), readline.PcItem("ok")),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
 		readline.PcItem("sleep"),

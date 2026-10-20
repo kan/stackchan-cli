@@ -597,7 +597,9 @@ func pcCheck(c *mcp.Client, sl *sleeper, cfg pcConfig, w pcWarner) {
 	spoke := sl.reacting(func() {
 		fmt.Fprintf(os.Stderr, "daemon: pc warning: %s\n", text)
 		// deviceErrors: a device timeout reported as a result is not "said".
-		sayErr = cmdSay([]string{"--while-face", "sad", text}, cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr, deviceErrors: true})
+		e := logEnv(c)
+		e.deviceErrors = true
+		sayErr = cmdSay([]string{"--while-face", "sad", text}, e)
 	})
 	switch {
 	case !spoke:

@@ -282,7 +282,7 @@ func (s *sleeper) apply(todo *sleepSteps, asleep bool) {
 			name = "sleep"
 		}
 		todo.attempts++
-		if failed := runNamedScript(s.c, name, defaultSleepScripts, true); failed == 0 {
+		if failed := runNamedScript(s.c, name, defaultSleepScripts, true, nil); failed == 0 {
 			todo.script, todo.face = false, false
 		} else if todo.attempts >= sleepScriptAttempts {
 			fmt.Fprintf(os.Stderr, "daemon: %s.txt: gave up after %d attempts\n", name, todo.attempts)
@@ -303,16 +303,24 @@ func (s *sleeper) apply(todo *sleepSteps, asleep bool) {
 	}
 }
 
-// reacting runs fn (a touch reaction) unless StackChan is asleep, and never
-// at the same time as apply. It reports whether fn ran.
-func (s *sleeper) reacting(fn func()) bool {
+// serialized runs fn (a timer notice) never at the same time as apply or a
+// touch reaction, asleep or not.
+func (s *sleeper) serialized(fn func()) {
 	s.stepMu.Lock()
 	defer s.stepMu.Unlock()
-	if s.asleep.Load() {
-		return false
-	}
 	fn()
-	return true
+}
+
+// reacting runs fn (a touch reaction) unless StackChan is asleep, and never
+// at the same time as apply. It reports whether fn ran.
+func (s *sleeper) reacting(fn func()) (ran bool) {
+	s.serialized(func() {
+		if !s.asleep.Load() {
+			fn()
+			ran = true
+		}
+	})
+	return ran
 }
 
 func deviceIsConnected(c *mcp.Client) bool {
@@ -375,11 +383,13 @@ func cmdWakeup(e cmdEnv) error {
 }
 
 // runNamedScript runs reactionsDir/<name>.txt, or defaults[name] when the file
-// is missing, with output to the daemon log. It returns the failed lines;
-// with deviceErrors, a tool result carrying "error" (the gateway reports
-// device timeouts that way) counts as a failed line too.
-func runNamedScript(c *mcp.Client, name string, defaults map[string]string, deviceErrors bool) (failed int) {
-	e := cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr, deviceErrors: deviceErrors}
+// is missing, with output to the daemon log. vars (nil for none) fills the
+// script's placeholders first. It returns the failed lines; with
+// deviceErrors, a tool result carrying "error" (the gateway reports device
+// timeouts that way) counts as a failed line too.
+func runNamedScript(c *mcp.Client, name string, defaults map[string]string, deviceErrors bool, vars *strings.Replacer) (failed int) {
+	e := logEnv(c)
+	e.deviceErrors = deviceErrors
 	script, ok := defaults[name]
 	if reactionsDir != "" {
 		file := filepath.Join(reactionsDir, name+".txt")
@@ -395,6 +405,9 @@ func runNamedScript(c *mcp.Client, name string, defaults map[string]string, devi
 	if !ok {
 		fmt.Fprintf(os.Stderr, "daemon: no script for %q\n", name)
 		return 0
+	}
+	if vars != nil {
+		script = vars.Replace(script)
 	}
 	return runScript(script, e)
 }

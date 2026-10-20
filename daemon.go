@@ -116,6 +116,7 @@ func runDaemon(opts daemonOptions) error {
 	reactionsDir = opts.reactions
 	seedScripts(reactionsDir, defaultReactions)
 	seedScripts(reactionsDir, defaultSleepScripts)
+	seedScripts(reactionsDir, defaultTimerScripts)
 	seedFile(pcConfigPath(), defaultPCMonitorFile)
 	var gatewayEnv []string
 	if opts.touch {
@@ -306,6 +307,8 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 	go watchSessions(c, sl, stop)
 	daemonCPU = &cpuHistory{} // before any command can run
 	go watchPC(c, sl, stop)
+	daemonTimers = &timerSet{} // before any command can run
+	go runTimers(c, daemonTimers, sl, stop)
 	if opts.touch {
 		// One-slot queue: a touch during a reaction waits and is answered right
 		// after it; a newer touch replaces an older waiting one.
@@ -318,7 +321,7 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 			ev.at = time.Now()
 			queueLatest(touches, ev)
 		})
-		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, sl, stop)
+		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, sl, daemonTimers, stop)
 	}
 	if voiceLn != nil {
 		fmt.Fprintf(os.Stderr, "daemon: voice commands on (rules %s)\n", voiceCommandsPath())
@@ -479,23 +482,37 @@ func queueLatest(q chan touchEvent, ev touchEvent) {
 // the matching reaction. A touch made during a reaction is answered after it,
 // unless it came within a second of the touch being answered (one palm
 // contact reported as two gestures) or has waited so long the moment passed.
-func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, sl *sleeper, stop <-chan struct{}) {
+//
+// While the pomodoro waits for an answer (timers may be nil), a touch is the
+// answer instead. It is taken without waiting for stepMu, which a notice
+// (asking for that very answer) may hold for several seconds.
+func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, sl *sleeper, timers *timerSet, stop <-chan struct{}) {
 	judge := touchJudge{tapMax: tapMax}
 	for {
 		select {
 		case <-stop:
 			return
 		case ev := <-touches:
+			gesture, ignored := judge.judge(ev, time.Now())
+			if gesture == "" {
+				fmt.Fprintf(os.Stderr, "daemon: touch ignored (%s): %s %dms\n", ignored, ev.Subtype, ev.DurationMs)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
+			if timers != nil && answerByTouch(timers, ev.at) {
+				continue
+			}
 			// The sensor is normally off while asleep; this covers a touch
 			// made just before sleep, or before the device accepted the change.
 			reacted := sl.reacting(func() {
-				gesture, ignored := judge.judge(ev, time.Now())
-				if gesture == "" {
-					fmt.Fprintf(os.Stderr, "daemon: touch ignored (%s): %s %dms\n", ignored, ev.Subtype, ev.DurationMs)
+				if waited := time.Since(ev.at); waited > touchMaxWait {
+					fmt.Fprintf(os.Stderr, "daemon: touch ignored (waited %s for a notice): %s\n", waited.Round(time.Second), gesture)
 					return
 				}
-				fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
 				reactToGesture(c, gesture)
+				if timers != nil {
+					timers.ledsUsed() // reactions end with clear-leds
+				}
 			})
 			if !reacted {
 				fmt.Fprintf(os.Stderr, "daemon: touch ignored (asleep): %s %dms\n", ev.Subtype, ev.DurationMs)
@@ -634,7 +651,7 @@ func seedFile(path, body string) {
 // to the daemon log (stderr) so it doesn't tangle with forwarded-command output.
 func reactToGesture(c *mcp.Client, gesture string) {
 	fmt.Fprintf(os.Stderr, "daemon: touch %q -> reacting\n", gesture)
-	runNamedScript(c, gesture, defaultReactions, false)
+	runNamedScript(c, gesture, defaultReactions, false, nil)
 }
 
 func fileExists(p string) bool {

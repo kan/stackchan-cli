@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -47,6 +48,10 @@ const defaultVoiceCommands = `# 音声コマンド: 画面をタップ → 話�
 #   {pc} はこの PC の調子（CPU・メモリ・ディスクの空き。気になる値から先に言い、話す間の表情も変わる）。
 #   {cpu} {mem} は使用率の数字だけ（例: 12）、{disk} はディスクの空き（例: 120ギガバイト）。
 #   閾値やドライブは ~/.stackchan/pc-monitor.txt に書く。
+# - キーワードの {dur} は「3分」「三分」「1時間半」「1分30秒」のような時間に当たり、コマンドの {dur} が
+#   その時間（3m など）になる（例: {dur}タイマー => timer {dur}）。
+# - ポモドーロが作業の終わりの返事を待っている間は、「はい」「OK」「わかった」などの短い返事がその返事になる
+#   （ルールより先に見る。待っていないときはルールのとおり）。
 # - 保存すれば次の聞き取りから反映される（再起動は要らない）。
 # - stackchan-cli voice "笑って" で、話さずに試せる。stackchan-cli voice だけなら一覧を表示する。
 笑って|わらって|にこにこ => avatar happy
@@ -62,12 +67,31 @@ const defaultVoiceCommands = `# 音声コマンド: 画面をタップ → 話�
 天気|てんき => say "{weather}"
 調子どう|ちょうしどう|調子は|ちょうしは|元気|げんき => say "{pc}"
 何時|なんじ|何日|なんにち|日付 => say "{date}、{weekday}、{time}です"
+タイマー止めて|タイマーとめて|タイマーやめて|タイマー消して|タイマーけして|タイマーキャンセル|タイマー取り消し => timer cancel
+ポモドーロ終わり|ポモドーロおわり|ポモドーロ終了|ポモドーロ止めて|ポモドーロとめて|ポモドーロやめて => pomodoro stop
+何分|何秒|残り時間|あとどれくらい => timer --say
+{dur}タイマー|{dur}のタイマー => timer {dur}
+ポモドーロ|ぽもどろ => pomodoro start
 * => say --face sad "ごめんね、わからなかった"; sleep 2000; avatar embarrassed
 `
 
 type voiceRule struct {
-	keywords []string // normalized
-	commands []string // REPL lines
+	keywords []string         // normalized
+	durs     []*regexp.Regexp // keywords with {dur}: group 1 is the duration
+	commands []string         // REPL lines
+}
+
+// durKeyword compiles a keyword with one {dur} ("{dur}タイマー") to match
+// normalized speech.
+func durKeyword(k string) (*regexp.Regexp, error) {
+	parts := strings.Split(k, "{dur}")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("keyword %q: {dur} may appear once", strings.TrimSpace(k))
+	}
+	for i, p := range parts {
+		parts[i] = regexp.QuoteMeta(normalizeSpeech(p))
+	}
+	return regexp.Compile(strings.Join(parts, "("+durPattern+")"))
 }
 
 type voiceRules struct {
@@ -166,13 +190,25 @@ func parseVoiceRules(text string) (voiceRules, error) {
 			continue
 		}
 		var keywords, written []string
+		var durs []*regexp.Regexp
 		for k := range strings.SplitSeq(lhs, "|") {
+			if strings.Contains(k, "{dur}") {
+				re, err := durKeyword(k)
+				if err != nil {
+					return vr, fmt.Errorf("line %d: %w", i, err)
+				}
+				durs = append(durs, re)
+				if w := strings.TrimSpace(strings.ReplaceAll(k, "{dur}", "")); w != "" {
+					written = append(written, w)
+				}
+				continue
+			}
 			if n := normalizeSpeech(k); n != "" {
 				keywords = append(keywords, n)
 				written = append(written, strings.TrimSpace(k))
 			}
 		}
-		if len(keywords) == 0 {
+		if len(keywords) == 0 && len(durs) == 0 {
 			return vr, fmt.Errorf("line %d: no keyword before =>", i)
 		}
 		for _, w := range promptWords(written) {
@@ -180,13 +216,15 @@ func parseVoiceRules(text string) (voiceRules, error) {
 				vr.words = append(vr.words, w)
 			}
 		}
-		vr.rules = append(vr.rules, voiceRule{keywords: keywords, commands: commands})
+		vr.rules = append(vr.rules, voiceRule{keywords: keywords, durs: durs, commands: commands})
 	}
 	return vr, nil
 }
 
 // match returns the commands for heard: the first rule with a keyword that
-// heard contains, else the fallback. keyword is "" for the fallback.
+// heard contains, else the fallback. keyword is "" for the fallback; for a
+// {dur} keyword it is the text it matched, and {dur} in the commands becomes
+// the duration ("3m").
 func (vr voiceRules) match(heard string) (commands []string, keyword string) {
 	if h := normalizeSpeech(heard); h != "" {
 		for _, r := range vr.rules {
@@ -195,9 +233,26 @@ func (vr voiceRules) match(heard string) (commands []string, keyword string) {
 					return r.commands, k
 				}
 			}
+			for _, re := range r.durs {
+				m := re.FindStringSubmatch(h)
+				if m == nil {
+					continue
+				}
+				if d, ok := parseSpokenDuration(m[1]); ok {
+					return withDur(r.commands, d), m[0]
+				}
+			}
 		}
 	}
 	return vr.fallback, ""
+}
+
+func withDur(commands []string, d time.Duration) []string {
+	out := make([]string, len(commands))
+	for i, c := range commands {
+		out[i] = strings.ReplaceAll(c, "{dur}", formatDur(d))
+	}
+	return out
 }
 
 // normalizeSpeech folds the differences speech recognition varies on:
@@ -296,6 +351,12 @@ func listVoiceRules(w io.Writer) error {
 // runVoice matches heard against the rules and runs what it matched,
 // reporting the match to e.errOut.
 func runVoice(heard string, e cmdEnv) error {
+	// While the pomodoro waits for an answer, a short yes is the answer
+	// (only then: "はい" said otherwise goes through the rules as before).
+	if t := daemonTimers; t != nil && t.waiting() && isAnswer(heard) {
+		fmt.Fprintf(e.errOut, "voice: heard %q -> the answer the pomodoro waits for\n", heard)
+		return cmdPomodoro([]string{"ok"}, e)
+	}
 	vr, err := loadVoiceRules()
 	if err != nil {
 		return err
@@ -372,7 +433,7 @@ type voiceHook struct {
 // newVoiceHook transcribes with a resident worker, started in the background
 // right away so the first utterance does not wait for the model.
 func newVoiceHook(c *mcp.Client) *voiceHook {
-	e := cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr}
+	e := logEnv(c)
 	stt := newSTTWorker()
 	go stt.warm()
 	var keep func([]byte, string)
