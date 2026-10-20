@@ -551,11 +551,31 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 
 ### 標準の表情・画面のオートオフ
 - 標準の表情は `embarrassed`（ユーザー要望。`main.go` の `restFace`）。切り替えるのは、`say` のあと、
-  音声コマンドの文字起こしのあと、daemon が本体の接続を見つけたとき（本体の起動時は `idle`）。
+  音声コマンドの文字起こしのあと、daemon が本体の接続を見つけたとき（本体の起動時は `idle`。眠っている間は切り替えない）。
 - 画面のオートオフは `set_off_timeout`（秒、0 で無効、既定 300）。本体の NVS に保存される。
   この PC の本体は 0（無効）に設定済み（2026-10-17、ユーザー要望）。
 - `call <tool> --json '{...}'` の順で書くと、以前は `--json` が読まれず空の引数で呼んでいた（Go の flag は
   最初の位置引数で解析を止める）。`parseCallArgs` はツール名の前と後ろの両方でフラグを読むよう修正済み。
+
+### 夜間の睡眠（2026-10-20）
+- 夜中に約 52 分おきに「なでる」（2〜6 秒）の誤検出が 2 回ずつ続き、反応していた（daemon.log で確認）。
+  原因は未調査。
+- daemon `--sleep HH:MM-HH:MM`（既定 `00:00-07:00`、`off` で時間帯なし、`sleep.go`）。眠る間は
+  `set_touch_sensor_enabled false`（NVS 保存。本体自身のタッチ動作と通知の両方が止まる）と
+  `reactions/sleep.txt`（LED 消灯、`brightness 0`）。起きるとセンサーを戻して `wake.txt`
+  （`brightness 100`、`avatar embarrassed`）。
+- `stackchan-cli sleep`（引数なし）で時刻に関係なく眠り、`wakeup` まで起きない（ユーザー要望）。
+  時間帯の中で `wakeup` すると、その時間帯が終わるまで起きている。状態は daemon のメモリのみ。
+  `sleep <ms>` は従来どおり一時停止（メタコマンドから `dispatch` の `cmdSleep` へ移動）。
+- 再接続時: 眠っていれば sleep.txt を再実行。起きていればセンサー有効化と `set_avatar restFace` のみで、
+  wake.txt は daemon 起動後の最初の接続だけ（手動で変えた明るさを Wi-Fi の切断のたびに戻さないため）。
+  失敗（本体のタイムアウト）は 30 秒ごとにやり直す。センサーは成功するまで、スクリプトは最大 5 回。
+  本体が未接続の間は試さない。gateway は本体のタイムアウトを `{"error": ...}` の通常の結果で返すので、
+  スクリプトの実行時だけ `cmdEnv.deviceErrors` でこれを失敗として数える（他のコマンドの終了コードは従来どおり）。
+- タッチの反応と sleep の適用は `sleeper.stepMu` で直列にする（眠る瞬間の反応の LED が残らないように）。
+- 引数なしの `sleep` はスクリプト内でも眠る（音声ルール「おやすみ => sleep」などに使えるよう、あえて残している）。
+- 実機で確認済み: 眠る間 `get_touch_sensor_enabled` = false、`get_device_info` の brightness = 0。
+  `sleep` → `wakeup` でも同じく切り替わる。
 
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`

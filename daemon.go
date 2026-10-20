@@ -39,14 +39,19 @@ func cmdDaemon(args []string) error {
 	set.BoolVar(&opts.avatar, "avatar", true, "send ~/.stackchan/avatar/*.png to the device on every (re)connect")
 	set.BoolVar(&opts.voice, "voice", true, "run ~/.stackchan/voice-commands.txt on speech after a screen tap")
 	set.StringVar(&opts.reactions, "reactions", filepath.Join(stackchanDir(), "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
+	sleepFlag := set.String("sleep", defaultSleepWindow, `daily HH:MM-HH:MM to sleep: touch sensor off, run reactions/sleep.txt ("off" = only on the sleep command)`)
 	if err := set.Parse(args); err != nil {
+		return err
+	}
+	var err error
+	if opts.sleep, err = parseSleepWindow(*sleepFlag); err != nil {
 		return err
 	}
 	opts.verbose = *verbose
 	// Report our own fatal error before flushing, so it reaches the log
 	// (main would print it after the timestamp relay is gone).
 	flush := timestampStderr()
-	err := runDaemon(opts)
+	err = runDaemon(opts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 	}
@@ -64,11 +69,13 @@ type daemonOptions struct {
 	avatar    bool
 	voice     bool
 	reactions string
+	sleep     *sleepWindow // nil = sleep only on the sleep command
 }
 
 func runDaemon(opts daemonOptions) error {
 	reactionsDir = opts.reactions
-	seedReactions(reactionsDir)
+	seedScripts(reactionsDir, defaultReactions)
+	seedScripts(reactionsDir, defaultSleepScripts)
 	var gatewayEnv []string
 	if opts.touch {
 		// Ask the gateway to push touch events as "stackchan/event" notifications.
@@ -143,7 +150,11 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 
 	// IPC is served right away; the device connection is only watched, so
 	// commands (e.g. status) never hang while the device is away.
-	go watchSessions(c, opts.avatar, stop)
+	sl := newSleeper(opts.sleep, c)
+	daemonSleeper = sl // before any command can run
+	fmt.Fprintf(os.Stderr, "daemon: sleeps %s and on the sleep command (touch sensor off, reactions sleep.txt / wake.txt)\n", opts.sleep)
+	go sl.run(stop)
+	go watchSessions(c, opts.avatar, sl, stop)
 	if opts.touch {
 		// One-slot queue: a touch during a reaction waits and is answered right
 		// after it; a newer touch replaces an older waiting one.
@@ -156,7 +167,7 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 			ev.at = time.Now()
 			queueLatest(touches, ev)
 		})
-		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, stop)
+		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, sl, stop)
 	}
 	if voiceLn != nil {
 		fmt.Fprintf(os.Stderr, "daemon: voice commands on (rules %s)\n", voiceCommandsPath())
@@ -311,20 +322,27 @@ func queueLatest(q chan touchEvent, ev touchEvent) {
 // the matching reaction. A touch made during a reaction is answered after it,
 // unless it came within a second of the touch being answered (one palm
 // contact reported as two gestures) or has waited so long the moment passed.
-func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, stop <-chan struct{}) {
+func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, sl *sleeper, stop <-chan struct{}) {
 	judge := touchJudge{tapMax: tapMax}
 	for {
 		select {
 		case <-stop:
 			return
 		case ev := <-touches:
-			gesture, ignored := judge.judge(ev, time.Now())
-			if gesture == "" {
-				fmt.Fprintf(os.Stderr, "daemon: touch ignored (%s): %s %dms\n", ignored, ev.Subtype, ev.DurationMs)
-				continue
+			// The sensor is normally off while asleep; this covers a touch
+			// made just before sleep, or before the device accepted the change.
+			reacted := sl.reacting(func() {
+				gesture, ignored := judge.judge(ev, time.Now())
+				if gesture == "" {
+					fmt.Fprintf(os.Stderr, "daemon: touch ignored (%s): %s %dms\n", ignored, ev.Subtype, ev.DurationMs)
+					return
+				}
+				fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
+				reactToGesture(c, gesture)
+			})
+			if !reacted {
+				fmt.Fprintf(os.Stderr, "daemon: touch ignored (asleep): %s %dms\n", ev.Subtype, ev.DurationMs)
 			}
-			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
-			reactToGesture(c, gesture)
 		}
 	}
 }
@@ -360,8 +378,8 @@ func (j *touchJudge) judge(ev touchEvent, now time.Time) (gesture, ignored strin
 // custom avatar set after each one: a loaded set lives in device RAM and is
 // gone after a reboot. A new connection is a new session_id (gateway ≥ 0.18
 // reports it, catching reconnects between polls) or a disconnected→connected
-// transition.
-func watchSessions(c *mcp.Client, avatar bool, stop <-chan struct{}) {
+// transition. sl then applies the sleep state (touch sensor, face, scripts).
+func watchSessions(c *mcp.Client, avatar bool, sl *sleeper, stop <-chan struct{}) {
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 	lastSession, wasConnected := "", false
@@ -382,10 +400,9 @@ func watchSessions(c *mcp.Client, avatar bool, stop <-chan struct{}) {
 						fmt.Fprintf(os.Stderr, "daemon: avatar loaded %s\n", text)
 					}
 				}
-				// The device comes up with its idle face; switch to ours.
-				if _, err := callTool(c, "set_avatar", map[string]any{"face": restFace}, nil); err != nil {
-					fmt.Fprintf(os.Stderr, "daemon: set_avatar %s: %v\n", restFace, err)
-				}
+				// The device comes up awake with its idle face; sl switches
+				// it to ours, or puts it back to sleep.
+				sl.deviceConnected()
 			}
 		}
 		select {
@@ -447,9 +464,10 @@ clear-leds
 `,
 }
 
-func seedReactions(dir string) {
-	for gesture, body := range defaultReactions {
-		seedFile(filepath.Join(dir, gesture+".txt"), body)
+// seedScripts writes each scripts[name] to dir/<name>.txt unless it exists.
+func seedScripts(dir string, scripts map[string]string) {
+	for name, body := range scripts {
+		seedFile(filepath.Join(dir, name+".txt"), body)
 	}
 }
 
@@ -468,18 +486,7 @@ func seedFile(path, body string) {
 // to the daemon log (stderr) so it doesn't tangle with forwarded-command output.
 func reactToGesture(c *mcp.Client, gesture string) {
 	fmt.Fprintf(os.Stderr, "daemon: touch %q -> reacting\n", gesture)
-	e := cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr}
-	if reactionsDir != "" {
-		if file := filepath.Join(reactionsDir, gesture+".txt"); fileExists(file) {
-			_ = doSource([]string{file}, e)
-			return
-		}
-	}
-	script, ok := defaultReactions[gesture]
-	if !ok {
-		script = "avatar happy"
-	}
-	runScript(script, e)
+	runNamedScript(c, gesture, defaultReactions, false)
 }
 
 func fileExists(p string) bool {

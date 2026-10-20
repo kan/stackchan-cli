@@ -38,6 +38,9 @@ type cmdEnv struct {
 	// inVoice is set while voice rules run, so a rule cannot call voice
 	// again (it could recurse until the daemon crashes).
 	inVoice bool
+	// deviceErrors makes a tool result carrying "error" fail the command
+	// (set for sleep.txt / wake.txt, which are retried on failure).
+	deviceErrors bool
 }
 
 // stdEnv writes to the terminal (one-shot and REPL).
@@ -128,6 +131,10 @@ func dispatch(cmd string, args []string, e cmdEnv) error {
 		return cmdPhoto(args, e)
 	case "call":
 		return cmdCall(args, e)
+	case "sleep":
+		return cmdSleep(args, e)
+	case "wakeup":
+		return cmdWakeup(e)
 	default:
 		return fmt.Errorf("unknown command: %s (try 'help')", cmd)
 	}
@@ -168,6 +175,10 @@ Commands:
                          (the daemon runs them on speech: tap the screen, speak, tap again)
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
+  sleep                  sleep until wakeup, whatever the time: touch sensor off,
+                         run ~/.stackchan/reactions/sleep.txt (needs the daemon)
+  wakeup                 wake up: touch sensor on, run reactions/wake.txt (needs the daemon)
+  sleep <ms>             pause (for scripts)
 
 Environment:
   STACKCHAN_MCP_EXE   path to the gateway executable (default: PATH / ~/.local/bin)
@@ -298,7 +309,12 @@ func localLANIP() string {
 // client and skips the wait, since the device stays connected between commands.
 func callAndPrint(verbose, waitDevice bool, tool string, args map[string]any, e cmdEnv) error {
 	run := func(c *mcp.Client) error {
-		_, err := callTool(c, tool, args, e.out)
+		res, err := callTool(c, tool, args, e.out)
+		if err == nil && e.deviceErrors {
+			if msg := resultError(res.Text()); msg != "" {
+				return fmt.Errorf("%s: %s", tool, msg)
+			}
+		}
 		return err
 	}
 	if waitDevice {
@@ -880,7 +896,7 @@ func replLoop(c *mcp.Client, remote bool, toolNames []string) error {
 }
 
 // runLine executes one REPL/script line in e. It handles blank /
-// '#'-comment lines, the meta commands (quit, help, sleep, repeat, source), and
+// '#'-comment lines, the meta commands (quit, help, repeat, source), and
 // otherwise dispatches to a device/tool command. stop=true ends the REPL/script.
 func runLine(line string, e cmdEnv) (stop bool, err error) {
 	line = strings.TrimSpace(line)
@@ -895,8 +911,6 @@ func runLine(line string, e cmdEnv) (stop bool, err error) {
 	case "help", "?":
 		replHelp(e.out)
 		return false, nil
-	case "sleep":
-		return false, doSleep(rest)
 	case "repeat":
 		return false, doRepeat(rest, e)
 	case "source", "run":
@@ -1018,6 +1032,7 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
 		readline.PcItem("sleep"),
+		readline.PcItem("wakeup"),
 		readline.PcItem("repeat"),
 		readline.PcItem("source"),
 		readline.PcItem("help"),
@@ -1051,6 +1066,7 @@ func replHelp(w io.Writer) {
   voice [text]                   run the voice command rules on text (no text: list them)
   photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
+  sleep | wakeup                 sleep until wakeup (needs the daemon)
   sleep <ms>                     pause (for choreography)
   repeat <n> <command...>        run a command n times
   source <file>                  run commands from a file (# lines are comments)
