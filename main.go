@@ -280,12 +280,10 @@ func gatewayEnv() []string {
 	// Personal default voice: 春日部つむぎ (VOICEVOX speaker 8). Override by
 	// setting STACKCHAN_VOICEVOX_DEFAULT_SPEAKER or passing `say --speaker N`.
 	if os.Getenv("STACKCHAN_VOICEVOX_DEFAULT_SPEAKER") == "" {
-		env = append(env, "STACKCHAN_VOICEVOX_DEFAULT_SPEAKER=8")
+		env = append(env, "STACKCHAN_VOICEVOX_DEFAULT_SPEAKER="+defaultVoicevoxSpeaker)
 	}
-	if os.Getenv("STACKCHAN_FASTER_WHISPER_MODEL") == "" {
-		env = append(env, "STACKCHAN_FASTER_WHISPER_MODEL="+defaultWhisperModel)
-	}
-	return env
+	// The same speech recognition settings as voice commands (see stt.go).
+	return append(env, whisperEnv(sttPython())...)
 }
 
 // localLANIP returns this host's primary LAN IPv4 by inspecting which local

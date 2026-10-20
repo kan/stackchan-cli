@@ -119,7 +119,9 @@ func runDaemon(opts daemonOptions) error {
 		}
 	}
 
-	// Warm up VOICEVOX in the background so the first reaction can speak.
+	// Warm up VOICEVOX in the background so the first reaction can speak. An
+	// engine we start lives as long as we do, so it runs on the GPU.
+	voicevoxResident = true
 	go func() {
 		if err := ensureVoicevox(); err != nil {
 			fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
@@ -259,8 +261,9 @@ func writeIPCStatus(w io.Writer, err error) {
 	fmt.Fprintf(w, "%sok\n", ipcStatusPrefix)
 }
 
-// timestampStderr prefixes every stderr line with the time, so the daemon log
-// shows when each event happened. It swaps os.Stderr for a pipe, which also
+// timestampStderr prefixes every stderr line with the time (to the
+// millisecond, to tell where a delay comes from), so the daemon log shows
+// when each event happened. It swaps os.Stderr for a pipe, which also
 // covers children that inherit os.Stderr. The returned flush restores
 // os.Stderr and waits (briefly) until everything written so far is relayed.
 func timestampStderr() (flush func()) {
@@ -277,7 +280,7 @@ func timestampStderr() (flush func()) {
 		for {
 			line, err := br.ReadString('\n')
 			if line != "" {
-				fmt.Fprintf(orig, "%s %s\n", time.Now().Format("2006-01-02 15:04:05"), strings.TrimRight(line, "\r\n"))
+				fmt.Fprintf(orig, "%s %s\n", time.Now().Format("2006-01-02 15:04:05.000"), strings.TrimRight(line, "\r\n"))
 			}
 			if err != nil {
 				return

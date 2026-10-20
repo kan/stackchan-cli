@@ -3,7 +3,9 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 	"unsafe"
 
@@ -36,6 +38,16 @@ func killChildrenOnExit() {
 		return
 	}
 	// The handle is intentionally never closed: it closes when we exit.
+}
+
+// killTree kills p and its descendants. Kill alone misses them, e.g. the real
+// interpreter that a uv venv's python.exe launcher starts as its child.
+func killTree(p *os.Process) {
+	cmd := exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.Pid))
+	hideWindow(cmd)
+	if cmd.Run() != nil {
+		_ = p.Kill()
+	}
 }
 
 // hideWindow makes a console child run without a visible window.

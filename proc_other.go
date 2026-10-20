@@ -2,9 +2,14 @@
 
 package main
 
-import "os/exec"
+import (
+	"os"
+	"os/exec"
+)
 
 func killChildrenOnExit() {}
+
+func killTree(p *os.Process) { _ = p.Kill() }
 
 func hideWindow(cmd *exec.Cmd) {}
 

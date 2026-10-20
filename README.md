@@ -27,6 +27,11 @@ stackchan-cli (Go)  --stdio MCP-->  stackchan-mcp gateway (Python)  --WebSocket-
   ```
   uv tool install --force --python 3.12 "stackchan-mcp[tts,stt-faster-whisper]==0.18.0" --with "av<19"
   ```
+  NVIDIA の GPU で文字起こしを速くするなら、CUDA のライブラリも同じ環境に入れる（約 1GB）。
+  入っていれば CLI が自動で GPU を使う（`STACKCHAN_FASTER_WHISPER_DEVICE=cpu` で CPU に戻せる）。
+  ```
+  uv tool install --force --python 3.12 "stackchan-mcp[tts,stt-faster-whisper]==0.18.0" --with "av<19" --with nvidia-cublas-cu12 --with "nvidia-cudnn-cu12==9.*"
+  ```
 - **StackChan** に stackchan-mcp ファームを書込み、WebSocket Gateway URL を本機へ向けてあること
   （captive portal の **Advanced** タブで `ws://<PC-LAN-IP>:8765/`。詳細は `CLAUDE.md`）。
 
@@ -144,7 +149,8 @@ stackchan-cli say "やっほー"
   上の行ほど優先で、`*` の行はどれにも当たらなかったときに実行する。daemon の初回起動時に雛形を生成し、
   保存すれば次の聞き取りから反映される。文字起こしの間は考えている顔（thinking）になる。
   - gateway が音声を `STACKCHAN_AUDIO_HOOK_URL`（daemon が `127.0.0.1:8771` で受ける）へ送り、
-    daemon が gateway の Python に入っている faster-whisper で文字にする（約 3〜4 秒）。
+    daemon が gateway の Python に入っている faster-whisper で文字にする。daemon はモデルを読み込んだ
+    Python を常駐させるので、文字起こしは CPU で約 2 秒、GPU で約 0.2 秒。
   - 話さずに試すには `stackchan-cli voice "笑って"`。ルールの一覧は `stackchan-cli voice`。`--voice=false` で無効。
 - daemon 稼働中は **one-shot も `repl` も `source` も**自動で IPC 転送される（その常駐 gateway を共有。
   `repl` は daemon があれば各行を転送、無ければ自前 gateway を起動）。転送したコマンドが失敗すると

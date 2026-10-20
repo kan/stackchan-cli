@@ -7,15 +7,12 @@ package main
 // ~/.stackchan/voice-commands.txt whose keyword the text contains.
 
 import (
-	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -248,16 +245,6 @@ func cmdVoice(args []string, e cmdEnv) error {
 
 // ---- daemon side ----------------------------------------------------------
 
-// transcribeScript runs in the gateway's Python, which has faster-whisper and
-// the model already, with the settings of the gateway's listen.
-const transcribeScript = `import os, sys
-from faster_whisper import WhisperModel
-m = WhisperModel(sys.argv[2], device=os.getenv("STACKCHAN_FASTER_WHISPER_DEVICE") or "cpu",
-                 compute_type=os.getenv("STACKCHAN_FASTER_WHISPER_COMPUTE_TYPE") or "int8")
-segments, _ = m.transcribe(sys.argv[1], language="ja", beam_size=1, vad_filter=False)
-sys.stdout.write("".join(s.text for s in segments).strip())
-`
-
 // sttPython finds the Python of the uv-installed gateway.
 func sttPython() string {
 	if p := os.Getenv("STACKCHAN_STT_PYTHON"); p != "" {
@@ -275,45 +262,6 @@ func sttPython() string {
 	return ""
 }
 
-// transcribeAudio turns Ogg/Opus audio into text with faster-whisper.
-func transcribeAudio(audio []byte) (string, error) {
-	py := sttPython()
-	if py == "" {
-		return "", errors.New("the gateway's Python was not found (set STACKCHAN_STT_PYTHON)")
-	}
-	f, err := os.CreateTemp(stackchanDir(), "voice-*.ogg")
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(f.Name())
-	_, werr := f.Write(audio)
-	if err := errors.Join(werr, f.Close()); err != nil {
-		return "", err
-	}
-	model := os.Getenv("STACKCHAN_FASTER_WHISPER_MODEL")
-	if model == "" {
-		model = defaultWhisperModel
-	}
-	// A stuck transcriber would block every later voice command.
-	ctx, cancel := context.WithTimeout(context.Background(), transcribeTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, py, "-I", "-X", "utf8", "-c", transcribeScript, f.Name(), model)
-	// python.exe of a uv venv may run the interpreter as its own child, which
-	// a timeout does not kill; stop waiting for its pipes shortly after.
-	cmd.WaitDelay = 5 * time.Second
-	hideWindow(cmd)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if ctx.Err() != nil {
-		return "", fmt.Errorf("transcribe: no result within %s (a model that is not downloaded yet is fetched on first use; run `stackchan-cli listen` once to fetch %s)", transcribeTimeout, model)
-	}
-	if err != nil {
-		return "", fmt.Errorf("transcribe: %v: %s", err, lastLine(stderr.String()))
-	}
-	return string(out), nil
-}
-
 func lastLine(s string) string {
 	s = strings.TrimSpace(s)
 	return s[strings.LastIndex(s, "\n")+1:]
@@ -329,10 +277,14 @@ type voiceHook struct {
 	jobs       chan []byte
 }
 
+// newVoiceHook transcribes with a resident worker, started in the background
+// right away so the first utterance does not wait for the model.
 func newVoiceHook(c *mcp.Client) *voiceHook {
 	e := cmdEnv{c: c, out: os.Stderr, errOut: os.Stderr}
+	stt := newSTTWorker()
+	go stt.warm()
 	return &voiceHook{
-		transcribe: transcribeAudio,
+		transcribe: stt.transcribe,
 		run: func(heard string) {
 			if err := runVoice(heard, e); err != nil {
 				fmt.Fprintf(os.Stderr, "daemon: %v\n", err)

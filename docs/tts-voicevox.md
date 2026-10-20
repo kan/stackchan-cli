@@ -12,6 +12,10 @@
   - daemon は起動時に立ち上げて保持し、daemon の終了と一緒に止める。
   - daemon 無しの one-shot `say` は、その都度起動して終了時に止める。
   - GUI などで既にエンジンが動いていれば、それをそのまま使う。
+  - daemon が起動するエンジンは GPU（`--use_gpu`）で動かす。文の合成は CPU の約 1.1 秒から約 0.1 秒に縮む
+    （gateway は文全体を合成してから送るので、合成の時間はそのまま発話前の無音になる）。
+    GPU の初回の合成は準備に約 5 秒かかるので、起動直後に一度合成しておく。GPU で起動や合成ができなければ
+    CPU で起動し直す。one-shot の `say` は毎回この準備を払うことになるので CPU のまま。
   - エンジンのログは `~/.stackchan/voicevox.log`。
 - 関連する環境変数:
 
@@ -20,6 +24,7 @@
   | `STACKCHAN_VOICEVOX_URL` | エンジンの URL（既定 `http://127.0.0.1:50021`）。localhost 以外なら自動起動しない |
   | `STACKCHAN_VOICEVOX_ENGINE` | `run.exe` のパス（既定は `%ProgramFiles%\VOICEVOX\vv-engine\run.exe`、次に `%LOCALAPPDATA%\Programs\VOICEVOX\vv-engine\run.exe`） |
   | `STACKCHAN_VOICEVOX_AUTOSTART` | `0` で自動起動しない |
+  | `STACKCHAN_VOICEVOX_GPU` | `0` で CPU で起動する |
 
 ### 2. gateway に opuslib（Opus エンコード）
 gateway は VOICEVOX エンジン実装を内蔵。Opus 化用の `opuslib` は `[tts]` extra に含まれる

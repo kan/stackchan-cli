@@ -514,6 +514,13 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 ### VOICEVOX 自動起動
 - エンジンが応答しなければ CLI が `vv-engine\run.exe` をウィンドウ無しで起動（約 2〜4 秒で準備完了）。
   daemon は起動時に立ち上げて保持。詳細は `docs/tts-voicevox.md`。
+- daemon が起動するエンジンは GPU（`--use_gpu`、DirectML）で動かし、起動直後に一度合成して慣らす（2026-10-20）。
+  one-shot の `say` は CPU のまま（毎回エンジンを起動・終了するので、GPU の初回の準備の方が高くつく）。
+  「2026年10月20日、火曜日、11時24分です」の合成が CPU 約 1.1 秒 → GPU 約 0.1 秒（初回のみ約 4.7 秒）。
+  gateway の `say` は文全体を合成し終えてから実時間のペースで送り、送り終えてから返るので、合成時間がそのまま
+  声が出るまでの無音になる。`voice "今何時"` の合計は 7.3 秒 → 6.4 秒（うち読み上げ 5.5 秒）。
+  GPU で起動や慣らしの合成ができなければ CPU で起動し直す。`STACKCHAN_VOICEVOX_GPU=0` で CPU。
+- daemon.log の時刻はミリ秒まで出す（遅れの原因を切り分けるため）。
 - 本体の音量は既定で 100（最大）。gateway に音量倍率の設定は無い。
 
 ### daemon のコマンドの並行実行（#1）
@@ -535,7 +542,7 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   設定されていれば Ogg/Opus で POST する（`audio_input_hook.py`）。設定が無ければ捨てる。文字起こしはしない。
 - daemon が `127.0.0.1:8771/voice` で受け、gateway の Python で faster-whisper を実行して文字にする。
   Python は `%APPDATA%\uv\tools\stackchan-mcp\Scripts\python.exe` で、`STACKCHAN_STT_PYTHON` で上書きできる。
-  設定は gateway の `listen` と同じ（`small`、CPU、int8、beam_size=1）。モデルの読み込み約 1.5 秒＋文字起こし約 2 秒。
+  設定は gateway の `listen` と同じ（`small`、beam_size=1）。Python は daemon が常駐させる（`stt.go`、下記）。
 - 照合のルールは `~/.stackchan/voice-commands.txt`（1 行 1 ルール、上ほど優先、`*` は当たらなかったとき）。
   照合の前に、全角カタカナはひらがな、全角英数は半角、大文字は小文字にそろえ、記号と空白は除く。
   呼びかけの言葉（「スタックチャン」）は必須にしない（ユーザー決定。聞き取りが不安定なため）。
@@ -556,6 +563,25 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   この PC の本体は 0（無効）に設定済み（2026-10-17、ユーザー要望）。
 - `call <tool> --json '{...}'` の順で書くと、以前は `--json` が読まれず空の引数で呼んでいた（Go の flag は
   最初の位置引数で解析を止める）。`parseCallArgs` はツール名の前と後ろの両方でフラグを読むよう修正済み。
+
+### 文字起こしの常駐と GPU（2026-10-20）
+- 音声コマンドの文字起こしは、daemon がモデルを読み込んだ Python を 1 つ常駐させて行う（`stt.go` の `sttWorker`）。
+  1 行の JSON `{"path": ...}` を送り、`{"text": ...}` か `{"error": ...}` を受け取る。daemon の起動時に読み込み、
+  60 秒答えが無いか落ちたら止めて、次の音声で起動し直す。以前は毎回 Python を起動していた（読み込みに 1.5〜3 秒）。
+- GPU: RTX 2070 SUPER（8GB）。CUDA のライブラリは gateway の環境に
+  `uv pip install --python %APPDATA%\uv\tools\stackchan-mcp\Scripts\python.exe nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`
+  で追加した。**gateway を `uv tool install --force` で入れ直すと消える**ので、そのときは README の `--with` 付きの
+  コマンドを使う。CTranslate2 は DLL を PATH からしか探さないため、`whisperEnv`（`stt.go`）が
+  `site-packages\nvidia\{cublas,cudnn,cuda_nvrtc}\bin` を PATH に足し、device=cuda / float16 にする（文字起こし係と
+  gateway の `listen` の両方）。cuBLAS と cuDNN の両方が無ければ CPU のまま。文字起こし係は GPU に失敗したら CPU に
+  切り替えるが、gateway の `listen` には切り替えが無い（gateway は改造しない）。GPU で困ったら
+  `STACKCHAN_FASTER_WHISPER_DEVICE=cpu` で両方 CPU に戻せる。
+- 文字起こし係の制限時間: モデルの読み込みは 5 分（初回のダウンロードを含む）、1 回の文字起こしは 60 秒。
+  止めるときは `taskkill /T` でプロセスの木ごと止める（uv の `python.exe` は本体の Python を子として起動するため）。
+- 実測（`small`、2.3 秒の音声）: CPU int8 で約 2.2 秒、GPU float16 で約 0.17 秒。GPU は初回だけ CUDA の準備に
+  1.5〜8.6 秒かかるので、文字起こし係は無音で一度文字起こししてから準備完了を返す。
+  音声の受信から結果まで: 常駐前 4〜5 秒 → CPU 常駐 約 3 秒 → GPU 約 1 秒。
+- 「スタックチャン」は `small` だと「スタッグちゃん」になる（照合では呼びかけを必須にしていないので実害は無い）。
 
 ### 夜間の睡眠（2026-10-20）
 - 夜中に約 52 分おきに「なでる」（2〜6 秒）の誤検出が 2 回ずつ続き、反応していた（daemon.log で確認）。
