@@ -116,6 +116,7 @@ func runDaemon(opts daemonOptions) error {
 	reactionsDir = opts.reactions
 	seedScripts(reactionsDir, defaultReactions)
 	seedScripts(reactionsDir, defaultSleepScripts)
+	seedFile(pcConfigPath(), defaultPCMonitorFile)
 	var gatewayEnv []string
 	if opts.touch {
 		// Ask the gateway to push touch events as "stackchan/event" notifications.
@@ -303,6 +304,8 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 	fmt.Fprintf(os.Stderr, "daemon: sleeps %s and on the sleep command (touch sensor off, reactions sleep.txt / wake.txt)\n", opts.sleep)
 	go sl.run(stop)
 	go watchSessions(c, sl, stop)
+	daemonCPU = &cpuHistory{} // before any command can run
+	go watchPC(c, sl, stop)
 	if opts.touch {
 		// One-slot queue: a touch during a reaction waits and is answered right
 		// after it; a newer touch replaces an older waiting one.

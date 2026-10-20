@@ -661,6 +661,33 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   `watchSessions` は送らない）。スクリプトに `avatar-load` を書かないこと（二重送信と競合の元になった）。
   送信は再試行せず、`stepMu` の外で行う（タッチの反応を止めないため）。
 
+### PC の調子（issue #5・2026-10-20）
+- `say` の `{pc}` `{cpu}` `{mem}` `{disk}`（`pcmon.go`）と、daemon の定期の警告（`watchPC` / `pcCheck`）。
+  値は依存を増やさず Windows API で取る（`pcstat_windows.go`。`GetSystemTimes` と `GlobalMemoryStatusEx` は
+  `x/sys/windows` に無いので kernel32 から直接呼ぶ）。ほかの OS では取れない旨を返す（`pcstat_other.go`）。
+- ユーザー決定: 閾値は CPU 90%・メモリ 90%・ディスクの空き 10% 未満。`{pc}` の言い方は 3 段階（どれも 70% 未満
+  「元気だよ」happy / CPU かメモリが 70% 以上「ちょっと忙しい」thinking / 閾値超え「ちょっと疲れてる」sad）。
+  確認は 1 時間ごと、眠っている間だけ黙る（別の時間帯は `quiet` で足せる。既定は無し）。
+  設定は `~/.stackchan/pc-monitor.txt`（使うたびに読み直す）。
+- CPU: daemon が 1 分ごとに `GetSystemTimes` を記録する（`daemonCPU`）。`{pc}` は直近 1〜2 分の平均、警告は 5 分の平均。
+  daemon が無いと 1 秒間で測る。記録が古すぎる（PC のスリープ明けなど）ときは平均を使わない。
+- 使用率は丸めてから閾値と比べる（「90パーセント」と言いながら「元気」にならないように）。
+- 警告は一度言った項目を閾値を下回るまで黙る（`pcWarner`）。眠っている・`quiet`・本体が未接続・発話の失敗のときは
+  言ったことにせず、次の確認に回す。発話は `sleeper.reacting` の中で行う（タッチの反応と重ねない、眠っていたら話さない）。
+- 話している間の表情は `say --while-face`（`{pc}` は自分の表情を提案し、フラグがあればフラグが勝つ）。警告も
+  `cmdSay` を `--while-face sad` で直接呼ぶ。
+- 設定ファイルの `key = value` の読み込みは `parseKeyValues`（weather.txt と pc-monitor.txt で共有）。
+  誤りのある pc-monitor.txt は全体を初期値にする（途中まで読んだ値を使うと、読めなかった閾値が 0 になり全部に警告する）。
+- CPU の平均の「d 前の記録」は、記録の間隔の半分（30 秒）まで若くてもよい。ticker の記録は「ちょうど 5 分前」に
+  数 µs 足りないことがあり、厳密に比べると確認で CPU が抜け、その警告が次の確認（1 時間後）まで遅れるため。
+- 実測（2026-10-20）: この PC は C: の空きが 3%（26GB）で over。`voice "調子どう？"` は 8.8 秒の発話。
+  daemon の起動 5 分後の確認で CPU 23%（5 分の平均）が取れ、ディスクの警告を 5.2 秒で話した。
+- `disk_free_gb`（ユーザー要望）: 1 以上なら、% の代わりに「空きがこの GB（1024³ バイト）未満」で警告する。初期値は 0
+  （% で判断）。この PC は大容量の C: で 3% でも 26GB あるので、`~/.stackchan/pc-monitor.txt` に `disk_free_gb = 10` を設定済み。
+- 既定の音声ルールに `調子どう|ちょうしどう|調子は|ちょうしは|元気|げんき => say "{pc}"` を天気の下に足した
+  （Whisper のプロンプトは上のルールの語から 120 文字まで入る。足した後の既定ルールで 78 文字）。
+- `stackchan-cli pc` で値と `{pc}` の文を表示する（話さない）。
+
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`
 - 公式デバイス: `firmware/main/apps/app_avatar/app_avatar.cpp`, `.../view/ws_call.cpp`,

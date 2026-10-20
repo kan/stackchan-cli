@@ -48,6 +48,27 @@ func parseWeatherConfig(text string) (weatherConfig, error) {
 		"name": &c.Name, "office": &c.Office, "area": &c.Area, "station": &c.Station,
 		"latitude": &c.Latitude, "longitude": &c.Longitude,
 	}
+	err := parseKeyValues("weather.txt", text, func(key, value string) error {
+		field := fields[key]
+		if field == nil {
+			return fmt.Errorf("unknown key %q (keys: name office area station latitude longitude)", key)
+		}
+		*field = value
+		return nil
+	})
+	if err != nil {
+		return c, err
+	}
+	if c.Office == "" || c.Area == "" || c.Station == "" {
+		return c, fmt.Errorf("weather.txt needs office, area and station\n%s", weatherConfigHelp)
+	}
+	return c, nil
+}
+
+// parseKeyValues reads a settings file of "key = value" lines (# starts a
+// comment, blank lines are skipped) and calls set for each. Errors carry the
+// file name and line.
+func parseKeyValues(file, text string, set func(key, value string) error) error {
 	sc := bufio.NewScanner(strings.NewReader(text))
 	for n := 1; sc.Scan(); n++ {
 		line, _, _ := strings.Cut(sc.Text(), "#")
@@ -55,16 +76,14 @@ func parseWeatherConfig(text string) (weatherConfig, error) {
 			continue
 		}
 		key, value, ok := strings.Cut(line, "=")
-		field := fields[strings.TrimSpace(key)]
-		if !ok || field == nil {
-			return c, fmt.Errorf("weather.txt line %d: want key = value (keys: name office area station latitude longitude)", n)
+		if !ok {
+			return fmt.Errorf("%s line %d: want key = value", file, n)
 		}
-		*field = strings.TrimSpace(value)
+		if err := set(strings.TrimSpace(key), strings.TrimSpace(value)); err != nil {
+			return fmt.Errorf("%s line %d: %w", file, n, err)
+		}
 	}
-	if c.Office == "" || c.Area == "" || c.Station == "" {
-		return c, fmt.Errorf("weather.txt needs office, area and station\n%s", weatherConfigHelp)
-	}
-	return c, nil
+	return nil
 }
 
 func loadWeatherConfig() (weatherConfig, error) {

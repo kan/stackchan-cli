@@ -127,6 +127,8 @@ func dispatch(cmd string, args []string, e cmdEnv) error {
 		return cmdListen(args, e)
 	case "voice":
 		return cmdVoice(args, e)
+	case "pc":
+		return cmdPC(args, e)
 	case "photo":
 		return cmdPhoto(args, e)
 	case "call":
@@ -167,13 +169,17 @@ Commands:
   clear-leds
   volume <0-100>
   brightness <0-100>
-  say [--speaker N] [--face F] <text>   speak via VOICEVOX (engine auto-started if needed)
+  say [--speaker N] [--face F] [--while-face F] <text>
+                         speak via VOICEVOX (engine auto-started if needed);
+                         --face after speaking, --while-face while speaking
   listen [--sec N] [--lang ja] [--model M] [--motion none|face-only|look-up]
                          record from the device mic and print the transcription
                          (needs the gateway's stt-faster-whisper extra)
   voice [text]           run ~/.stackchan/voice-commands.txt on text as if it were heard;
                          without text, list the rules
                          (the daemon runs them on speech: tap the screen, speak, tap again)
+  pc                     show this PC's CPU, memory and disk space, and what say's {pc}
+                         would say (settings: ~/.stackchan/pc-monitor.txt)
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
   sleep                  sleep until wakeup, whatever the time: touch sensor off,
@@ -643,6 +649,7 @@ func cmdSay(args []string, e cmdEnv) error {
 	set, verbose := fs("say")
 	speaker := set.Int("speaker", 0, "VOICEVOX speaker id (0 = gateway default; e.g. 3=ずんだもん, 8=春日部つむぎ)")
 	face := set.String("face", restFace, "avatar face to set after speaking (\"\" = leave unchanged)")
+	whileFace := set.String("while-face", "", "avatar face to show while speaking (\"\" = the one {pc} picks, else leave unchanged)")
 	if err := set.Parse(args); err != nil {
 		return err
 	}
@@ -659,36 +666,59 @@ func cmdSay(args []string, e cmdEnv) error {
 	engineReady := make(chan error, 1)
 	go func() { engineReady <- ensureVoicevox() }()
 	// Its notes are written by this command's goroutine, not alongside it.
-	type filled struct{ text, notes string }
-	weatherText := make(chan filled, 1)
+	// The PC values are read here too: without the daemon's record, the CPU
+	// is measured over a second.
+	type filled struct{ text, face, notes string }
+	expanded := make(chan filled, 1)
 	go func() {
 		var notes strings.Builder
 		t, err := expandWeather(text, time.Now(), &notes)
 		if err != nil {
 			fmt.Fprintf(&notes, "warning: %v\n", err)
 		}
-		weatherText <- filled{t, notes.String()}
+		t, face := expandPC(t, &notes)
+		expanded <- filled{t, face, notes.String()}
 	}()
 	return withDevice(*verbose, e.c, func(c *mcp.Client) error {
 		if err := <-engineReady; err != nil {
 			fmt.Fprintf(e.errOut, "warning: %v\n", err)
 		}
-		w := <-weatherText
+		w := <-expanded
 		fmt.Fprint(e.errOut, w.notes)
+		during := *whileFace
+		if during == "" {
+			during = w.face // {pc} shows how the PC is doing
+		}
+		setFace(c, during, e.errOut)
 		// Filled in now, not before a one-shot gateway waited for the device.
 		sayArgs["text"] = expandSayVars(w.text, time.Now())
-		if _, err := callTool(c, "say", sayArgs, e.out); err != nil {
+		res, err := callTool(c, "say", sayArgs, e.out)
+		if err == nil && e.deviceErrors {
+			if msg := resultError(res.Text()); msg != "" {
+				err = fmt.Errorf("say: %s", msg)
+			}
+		}
+		if err != nil {
+			if during != "" {
+				setFace(c, *face, e.errOut) // do not leave the face for speaking on
+			}
 			return err
 		}
 		// say() blocks until playback finishes, so the mouth has stopped by now;
 		// settle on a resting face.
-		if *face != "" {
-			if _, err := callTool(c, "set_avatar", map[string]any{"face": *face}, nil); err != nil {
-				fmt.Fprintf(e.errOut, "warning: set_avatar %s failed: %v\n", *face, err)
-			}
-		}
+		setFace(c, *face, e.errOut)
 		return nil
 	})
+}
+
+// setFace sets the avatar face, warning to w when it fails. "" does nothing.
+func setFace(c *mcp.Client, face string, w io.Writer) {
+	if face == "" {
+		return
+	}
+	if _, err := callTool(c, "set_avatar", map[string]any{"face": face}, nil); err != nil {
+		fmt.Fprintf(w, "warning: set_avatar %s failed: %v\n", face, err)
+	}
 }
 
 func cmdListen(args []string, e cmdEnv) error {
@@ -1060,9 +1090,10 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("clear-leds"),
 		readline.PcItem("volume"),
 		readline.PcItem("brightness"),
-		readline.PcItem("say", readline.PcItem("--speaker"), readline.PcItem("--face")),
+		readline.PcItem("say", readline.PcItem("--speaker"), readline.PcItem("--face"), readline.PcItem("--while-face")),
 		readline.PcItem("listen", readline.PcItem("--sec"), readline.PcItem("--lang"), readline.PcItem("--model"), readline.PcItem("--motion")),
 		readline.PcItem("voice"),
+		readline.PcItem("pc"),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
 		readline.PcItem("call", pcItems(toolNames...)...),
 		readline.PcItem("sleep"),

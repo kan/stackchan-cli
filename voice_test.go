@@ -125,15 +125,17 @@ func TestDefaultVoiceCommandsParse(t *testing.T) {
 	// What the device's microphone gave (2026-10-20), and the weather rule
 	// each should reach.
 	for heard, want := range map[string]string{
-		"今日の天気は":   `say "{weather}"`,
-		"いまなんど":    `say "{weather_temp}"`,
-		"今何度？":     `say "{weather_temp}"`,
-		"カサイル?":    `say "{weather_rain}"`,
-		"明日は雨降る？":  `say "{weather_rain_tomorrow}"`,
-		"明日暑いかな":   `say "{weather_tomorrow}"`,
-		"明日何度？":    `say "{weather_temp_tomorrow}"`,
-		"明日傘いる？":   `say "{weather_rain_tomorrow}"`,
-		"かさ、いるかな?": `say "{weather_rain}"`,
+		"今日の天気は":      `say "{weather}"`,
+		"いまなんど":       `say "{weather_temp}"`,
+		"今何度？":        `say "{weather_temp}"`,
+		"カサイル?":       `say "{weather_rain}"`,
+		"明日は雨降る？":     `say "{weather_rain_tomorrow}"`,
+		"明日暑いかな":      `say "{weather_tomorrow}"`,
+		"明日何度？":       `say "{weather_temp_tomorrow}"`,
+		"明日傘いる？":      `say "{weather_rain_tomorrow}"`,
+		"かさ、いるかな?":    `say "{weather_rain}"`,
+		"調子どう？":       `say "{pc}"`,
+		"スタックチャン、元気？": `say "{pc}"`,
 	} {
 		if got, _ := vr.match(heard); !reflect.DeepEqual(got, []string{want}) {
 			t.Errorf("%s -> %q, want %q", heard, got, want)
