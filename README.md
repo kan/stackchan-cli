@@ -262,6 +262,38 @@ quiet = off      # 警告を話さない時間帯（HH:MM-HH:MM）。眠って�
 drives = C:      # 見るドライブ（, 区切り。例: C:, D:）
 ```
 
+### Claude に尋ねる（ask）
+
+```
+stackchan-cli ask "東京タワーってなに？"      # Claude に尋ねて、答えを話す（待つ間は thinking の顔）
+stackchan-cli ask --quiet "こんにちは"         # 答えを表示するだけ（本体を使わない）
+```
+
+- この PC の Claude Code（`claude -p`）を非対話で起動して尋ねる。API キーは使わず、Claude Code にログインした
+  アカウントの利用枠で動く。
+- 速さのため、Claude Code の既定のシステムプロンプトを短いロボット用の指示（`~/.stackchan/ask/system.txt`）に置き換え、
+  使えるツールを Web 検索（WebSearch / WebFetch）だけにし、MCP サーバーと個人の設定（CLAUDE.md など）を読み込まない。
+  sonnet で返事まで 3〜6 秒（2026-10-20 に測定）。
+- 前の答えから 5 分以内の質問は、同じ会話として続ける（「それっていつできたの？」のような聞き返しができる）。
+- 1 日 50 回まで。超えると「今日はもう調べられないよ」と話す。30 秒で答えが無ければ「時間内に答えられなかった」と話す。
+- 設定は `~/.stackchan/ask.txt`（daemon の初回起動で雛形を作る）:
+
+  ```
+  model = sonnet   # claude -p の --model
+  limit = 50       # 1 日に Claude を呼ぶ回数の上限（0 で上限なし）
+  timeout = 30     # 返事を待つ秒数
+  memory = 5       # 前の質問からこの分数以内なら、同じ会話として続ける（0 で毎回新しく）
+  config_dir =     # claude の設定ディレクトリ（CLAUDE_CONFIG_DIR）。空なら daemon の環境のまま
+  ```
+
+  Claude Code の設定ディレクトリを使い分けている（シェルの関数などで `CLAUDE_CONFIG_DIR` を切り替えている）なら、
+  daemon は `claude` をその関数を通さずに起動するので、`config_dir` で使うディレクトリを指定する。
+- 音声コマンドの既定のルール: 「〜ってなに」「調べて」「教えて」を含む話しかけを `ask "{heard}"` で Claude に尋ねる
+  （`{heard}` は聞き取った文）。「〜ってなに」はタイマーやポモドーロのルールより先に見るので、「ポモドーロってなに？」で
+  ポモドーロが始まることはない。天気など組み込みで答えられるもの（「明日の天気を教えて」）は、上のルールが先に答える。どのルールにも当たらない
+  話しかけ（`*`）は Claude に回さない（聞き間違いや雑音で呼ばないため）。
+- `claude` は PATH から探す。`STACKCHAN_CLAUDE_EXE` で場所を指定できる。
+
 ### タイマーとポモドーロ
 
 daemon がタイマーを持つ（daemon が無いと使えない。daemon を再起動すると消える）。

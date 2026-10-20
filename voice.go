@@ -50,6 +50,8 @@ const defaultVoiceCommands = `# 音声コマンド: 画面をタップ → 話�
 #   閾値やドライブは ~/.stackchan/pc-monitor.txt に書く。
 # - キーワードの {dur} は「3分」「三分」「1時間半」「1分30秒」のような時間に当たり、コマンドの {dur} が
 #   その時間（3m など）になる（例: {dur}タイマー => timer {dur}）。
+# - コマンドの {heard} は聞き取った文になる。ask "{heard}" は Claude に尋ねて答えを話す
+#   （~/.stackchan/ask.txt に 1 日の上限など、~/.stackchan/ask/system.txt に話し方の指示）。
 # - ポモドーロが作業の終わりの返事を待っている間は、「はい」「OK」「わかった」などの短い返事がその返事になる
 #   （ルールより先に見る。待っていないときはルールのとおり）。
 # - 保存すれば次の聞き取りから反映される（再起動は要らない）。
@@ -67,11 +69,13 @@ const defaultVoiceCommands = `# 音声コマンド: 画面をタップ → 話�
 天気|てんき => say "{weather}"
 調子どう|ちょうしどう|調子は|ちょうしは|元気|げんき => say "{pc}"
 何時|なんじ|何日|なんにち|日付 => say "{date}、{weekday}、{time}です"
+ってなに|って何|ってなあに => ask "{heard}"
 タイマー止めて|タイマーとめて|タイマーやめて|タイマー消して|タイマーけして|タイマーキャンセル|タイマー取り消し => timer cancel
 ポモドーロ終わり|ポモドーロおわり|ポモドーロ終了|ポモドーロ止めて|ポモドーロとめて|ポモドーロやめて => pomodoro stop
 何分|何秒|残り時間|あとどれくらい => timer --say
 {dur}タイマー|{dur}のタイマー => timer {dur}
 ポモドーロ|ぽもどろ => pomodoro start
+調べて|しらべて|教えて|おしえて => ask "{heard}"
 * => say --face sad "ごめんね、わからなかった"; sleep 2000; avatar embarrassed
 `
 
@@ -223,14 +227,24 @@ func parseVoiceRules(text string) (voiceRules, error) {
 
 // match returns the commands for heard: the first rule with a keyword that
 // heard contains, else the fallback. keyword is "" for the fallback; for a
-// {dur} keyword it is the text it matched, and {dur} in the commands becomes
-// the duration ("3m").
+// {dur} keyword it is the text it matched. In the commands, {dur} becomes
+// the duration ("3m") and {heard} the sentence heard (heardForCommands).
 func (vr voiceRules) match(heard string) (commands []string, keyword string) {
+	commands, keyword, dur := vr.find(heard)
+	vars := []string{"{heard}", heardForCommands(heard)}
+	if dur > 0 {
+		vars = append(vars, "{dur}", formatDur(dur))
+	}
+	return withVars(commands, strings.NewReplacer(vars...)), keyword
+}
+
+// find is match before the commands are filled in; dur is the {dur} matched.
+func (vr voiceRules) find(heard string) (commands []string, keyword string, dur time.Duration) {
 	if h := normalizeSpeech(heard); h != "" {
 		for _, r := range vr.rules {
 			for _, k := range r.keywords {
 				if strings.Contains(h, k) {
-					return r.commands, k
+					return r.commands, k, 0
 				}
 			}
 			for _, re := range r.durs {
@@ -239,18 +253,28 @@ func (vr voiceRules) match(heard string) (commands []string, keyword string) {
 					continue
 				}
 				if d, ok := parseSpokenDuration(m[1]); ok {
-					return withDur(r.commands, d), m[0]
+					return r.commands, m[0], d
 				}
 			}
 		}
 	}
-	return vr.fallback, ""
+	return vr.fallback, "", 0
 }
 
-func withDur(commands []string, d time.Duration) []string {
+// heardForCommands is the sentence heard as {heard} puts it in a command:
+// without quotes, line breaks or semicolons, so it cannot end the quoted text
+// it is put in (ask "{heard}") or start another command.
+func heardForCommands(heard string) string {
+	return strings.TrimSpace(strings.NewReplacer(`"`, "", `'`, "", "\n", " ", "\r", " ", ";", "、").Replace(heard))
+}
+
+func withVars(commands []string, vars *strings.Replacer) []string {
+	if commands == nil {
+		return nil
+	}
 	out := make([]string, len(commands))
 	for i, c := range commands {
-		out[i] = strings.ReplaceAll(c, "{dur}", formatDur(d))
+		out[i] = vars.Replace(c)
 	}
 	return out
 }

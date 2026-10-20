@@ -118,6 +118,8 @@ func runDaemon(opts daemonOptions) error {
 	seedScripts(reactionsDir, defaultSleepScripts)
 	seedScripts(reactionsDir, defaultTimerScripts)
 	seedFile(pcConfigPath(), defaultPCMonitorFile)
+	seedFile(askConfigPath(), defaultAskFile)
+	seedFile(askSystemPath(), defaultAskSystem)
 	var gatewayEnv []string
 	if opts.touch {
 		// Ask the gateway to push touch events as "stackchan/event" notifications.

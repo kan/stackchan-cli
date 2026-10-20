@@ -133,6 +133,8 @@ func dispatch(cmd string, args []string, e cmdEnv) error {
 		return cmdVoice(args, e)
 	case "pc":
 		return cmdPC(args, e)
+	case "ask":
+		return cmdAsk(args, e)
 	case "timer":
 		return cmdTimer(args, e)
 	case "pomodoro":
@@ -188,6 +190,9 @@ Commands:
                          (the daemon runs them on speech: tap the screen, speak, tap again)
   pc                     show this PC's CPU, memory and disk space, and what say's {pc}
                          would say (settings: ~/.stackchan/pc-monitor.txt)
+  ask [--quiet] <question>  ask Claude (claude -p, web search allowed) and speak the
+                         answer (--quiet: print only); settings ~/.stackchan/ask.txt,
+                         persona ~/.stackchan/ask/system.txt
   timer <dur> [--quiet]  start a timer (3m, 1h30m, 90s, 3分); speaks when it is up (needs the daemon)
   timer [--say]          list the timers and the pomodoro (--say: speak it)
   timer cancel           cancel the timers (not the pomodoro)
@@ -807,6 +812,16 @@ func stackchanDir() string {
 	return filepath.Join(home, ".stackchan")
 }
 
+// expandHome turns a leading ~ into the home directory (for paths in the
+// settings files).
+func expandHome(p string) string {
+	if rest, ok := strings.CutPrefix(p, "~"); ok && (rest == "" || rest[0] == '/' || rest[0] == '\\') {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, rest)
+	}
+	return p
+}
+
 func capturesDir() string {
 	return filepath.Join(stackchanDir(), "captures")
 }
@@ -1127,6 +1142,7 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("listen", readline.PcItem("--sec"), readline.PcItem("--lang"), readline.PcItem("--model"), readline.PcItem("--motion")),
 		readline.PcItem("voice"),
 		readline.PcItem("pc"),
+		readline.PcItem("ask", readline.PcItem("--quiet")),
 		readline.PcItem("timer", readline.PcItem("cancel"), readline.PcItem("--say"), readline.PcItem("--quiet")),
 		readline.PcItem("pomodoro", readline.PcItem("start"), readline.PcItem("stop"), readline.PcItem("ok")),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),
