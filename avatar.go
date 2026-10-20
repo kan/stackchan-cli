@@ -32,18 +32,43 @@ const (
 	avatarLoadTimeout = 120 // seconds; power-save Wi-Fi can make the fetch slow
 )
 
-func avatarDir() string { return filepath.Join(stackchanDir(), "avatar") }
+// avatarDir is the directory of an avatar set: ~/.stackchan/avatar for the
+// default set (name ""), ~/.stackchan/avatar-<name> for another (e.g. the
+// sleep set, made by scripts/gen_avatars.py --sleep).
+func avatarDir(name string) string {
+	if name == "" {
+		return filepath.Join(stackchanDir(), "avatar")
+	}
+	return filepath.Join(stackchanDir(), "avatar-"+name)
+}
+
+// validSetName keeps a set name to one path element under ~/.stackchan.
+func validSetName(name string) bool {
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
 
 // buildAvatarPayload converts the PNGs into one raw little-endian RGB565 file
 // (14 × 160×120) and returns its path; the caller removes it after the upload.
 // Each call gets its own file so concurrent uploads (daemon reconnect + a
 // manual avatar-load) never overwrite a file the gateway is serving.
 // Images whose size is an integer multiple of 160×120 (e.g. 320×240) are
-// box-downscaled.
-func buildAvatarPayload() (string, error) {
+// box-downscaled. set names the avatar set (see avatarDir).
+func buildAvatarPayload(set string) (string, error) {
+	if !validSetName(set) {
+		return "", fmt.Errorf("avatar set %q: use letters, digits, - and _ only", set)
+	}
+	dir := avatarDir(set)
+	if _, err := os.Stat(dir); err != nil && set != "" {
+		return "", fmt.Errorf("avatar set %q: %w (make the sleep set with scripts/gen_avatars.py --sleep)", set, err)
+	}
 	out := make([]byte, 0, len(avatarFrames)*avatarW*avatarH*2)
 	for _, name := range avatarFrames {
-		frame, err := loadAvatarFrame(filepath.Join(avatarDir(), name+".png"))
+		frame, err := loadAvatarFrame(filepath.Join(dir, name+".png"))
 		if err != nil {
 			return "", err
 		}
@@ -102,8 +127,8 @@ func loadAvatarFrame(path string) ([]byte, error) {
 
 // withAvatarPayload builds the payload, runs upload with the load_avatar_set
 // arguments, and removes the payload file afterwards.
-func withAvatarPayload(upload func(args map[string]any) error) error {
-	path, err := buildAvatarPayload()
+func withAvatarPayload(set string, upload func(args map[string]any) error) error {
+	path, err := buildAvatarPayload(set)
 	if err != nil {
 		return err
 	}
@@ -111,10 +136,10 @@ func withAvatarPayload(upload func(args map[string]any) error) error {
 	return upload(map[string]any{"archive_path": path, "mode": "layered", "timeout": avatarLoadTimeout})
 }
 
-// loadAvatarQuiet uploads the avatar set and returns the result text instead
+// loadAvatarQuiet uploads an avatar set and returns the result text instead
 // of printing it, for the daemon to log.
-func loadAvatarQuiet(c *mcp.Client) (text string, err error) {
-	err = withAvatarPayload(func(args map[string]any) error {
+func loadAvatarQuiet(c *mcp.Client, set string) (text string, err error) {
+	err = withAvatarPayload(set, func(args map[string]any) error {
 		res, err := callTool(c, "load_avatar_set", args, nil)
 		text = res.Text()
 		return err
@@ -124,10 +149,11 @@ func loadAvatarQuiet(c *mcp.Client) (text string, err error) {
 
 func cmdAvatarLoad(args []string, e cmdEnv) error {
 	set, verbose := fs("avatar-load")
+	name := set.String("set", "", `avatar set to send: "" = ~/.stackchan/avatar, NAME = ~/.stackchan/avatar-NAME (e.g. sleep)`)
 	if err := set.Parse(args); err != nil {
 		return err
 	}
-	return withAvatarPayload(func(toolArgs map[string]any) error {
+	return withAvatarPayload(*name, func(toolArgs map[string]any) error {
 		return callAndPrint(*verbose, true, "load_avatar_set", toolArgs, e)
 	})
 }

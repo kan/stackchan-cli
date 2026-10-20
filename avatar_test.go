@@ -106,17 +106,17 @@ func TestLoadAvatarFrameRejectsBadSizes(t *testing.T) {
 
 func TestBuildAvatarPayload(t *testing.T) {
 	fakeHome(t)
-	if err := os.MkdirAll(avatarDir(), 0o755); err != nil {
+	if err := os.MkdirAll(avatarDir(""), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range avatarFrames {
-		writePNG(t, filepath.Join(avatarDir(), name+".png"), 160, 120, solid(color.RGBA{A: 0xFF}))
+		writePNG(t, filepath.Join(avatarDir(""), name+".png"), 160, 120, solid(color.RGBA{A: 0xFF}))
 	}
 	if len(avatarFrames) != 14 {
 		t.Fatalf("layered mode has 14 frames, avatarFrames has %d", len(avatarFrames))
 	}
 
-	path, err := buildAvatarPayload()
+	path, err := buildAvatarPayload("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestBuildAvatarPayload(t *testing.T) {
 	}
 
 	// Each call writes its own file, so concurrent uploads don't collide.
-	path2, err := buildAvatarPayload()
+	path2, err := buildAvatarPayload("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,13 +142,50 @@ func TestBuildAvatarPayload(t *testing.T) {
 
 func TestBuildAvatarPayloadMissingFrame(t *testing.T) {
 	fakeHome(t)
-	if err := os.MkdirAll(avatarDir(), 0o755); err != nil {
+	if err := os.MkdirAll(avatarDir(""), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range avatarFrames[1:] { // no idle.png
-		writePNG(t, filepath.Join(avatarDir(), name+".png"), 160, 120, solid(color.RGBA{A: 0xFF}))
+		writePNG(t, filepath.Join(avatarDir(""), name+".png"), 160, 120, solid(color.RGBA{A: 0xFF}))
 	}
-	if _, err := buildAvatarPayload(); err == nil || !strings.Contains(err.Error(), "idle.png") {
+	if _, err := buildAvatarPayload(""); err == nil || !strings.Contains(err.Error(), "idle.png") {
 		t.Errorf("err = %v, want an error naming idle.png", err)
+	}
+}
+
+func TestBuildAvatarPayloadNamedSet(t *testing.T) {
+	fakeHome(t)
+	if got, want := avatarDir("sleep"), filepath.Join(stackchanDir(), "avatar-sleep"); got != want {
+		t.Errorf("avatarDir(sleep) = %s, want %s", got, want)
+	}
+	if _, err := buildAvatarPayload("sleep"); err == nil || !strings.Contains(err.Error(), "gen_avatars.py --sleep") {
+		t.Errorf("missing sleep set: err = %v, want a hint to make it", err)
+	}
+	// Default set black, sleep set white: the payload must come from the sleep set.
+	for set, c := range map[string]color.RGBA{"": {A: 0xFF}, "sleep": {R: 0xFF, G: 0xFF, B: 0xFF, A: 0xFF}} {
+		if err := os.MkdirAll(avatarDir(set), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range avatarFrames {
+			writePNG(t, filepath.Join(avatarDir(set), name+".png"), 160, 120, solid(c))
+		}
+	}
+	path, err := buildAvatarPayload("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data[0] != 0xFF || data[1] != 0xFF {
+		t.Errorf("first pixel = %02x %02x, want white (ff ff) from the sleep set", data[0], data[1])
+	}
+
+	for _, bad := range []string{"../x", "a/b", `a\b`, "..", "sleep set"} {
+		if _, err := buildAvatarPayload(bad); err == nil {
+			t.Errorf("set name %q was accepted", bad)
+		}
 	}
 }

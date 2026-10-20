@@ -120,9 +120,13 @@ stackchan-cli say "やっほー"
   を雛形生成。中身は REPL コマンド（`avatar`/`mouth`/`led`/`say`/`sleep` など）を行で並べるだけ。
   **再ビルド不要**で、ジェスチャ発火時にその場のファイル内容が実行される（`--reactions <dir>` で場所変更）。
 - **夜は眠る**。`--sleep HH:MM-HH:MM`（既定 `00:00-07:00`、`--sleep off` で無効）の間は、本体の頭の
-  タッチセンサーを止め（`set_touch_sensor_enabled`。本体自身のタッチ動作も止まる）、
-  `~/.stackchan/reactions/sleep.txt`（既定: LED 消灯、画面の明るさ 0）を実行する。終わると
-  センサーを戻して `wake.txt`（既定: 明るさ 100、標準の表情）を実行する。
+  タッチセンサーを止める（`set_touch_sensor_enabled`。本体自身のタッチ動作も止まる）。
+  そして寝顔のアバターを送り、`~/.stackchan/reactions/sleep.txt`（既定: LED 消灯、画面の明るさ 10）を
+  実行する。終わるとセンサーを戻し、通常のアバターを送って `wake.txt`（既定: 明るさ 100、標準の表情）を実行する。
+  - 寝顔は `~/.stackchan/avatar-sleep/`（14 枚。表情とまばたきはすべて寝顔になる。口の形だけは発話に合わせて
+    変わる）。`uv run --with pillow python scripts/gen_avatars.py --sleep` で作る。無ければ通常のアバターのまま眠る。
+    本体がつながるたびにも、状態に合う方を送る（`--avatar=false` なら送らない）。
+    手動では `stackchan-cli avatar-load --set sleep`（通常に戻すのは `avatar-load`）。
   - `stackchan-cli sleep` で時刻に関係なく眠り、`stackchan-cli wakeup` まで起きない（朝 7 時を過ぎても）。
     眠る時間帯に `wakeup` すると、その時間帯が終わるまで起きている。どちらも daemon が必要で、
     状態は daemon を再起動すると消える。数字付きの `sleep <ms>` は従来どおりスクリプト内の一時停止。

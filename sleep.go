@@ -122,6 +122,7 @@ func (st *sleepState) wakeup(now time.Time) {
 // sleeper keeps the device's sleep state in line with sleepState.
 type sleeper struct {
 	c         *mcp.Client
+	avatar    bool       // send the avatar set for the state (daemon --avatar)
 	mu        sync.Mutex // guards st
 	st        sleepState
 	asleep    atomic.Bool   // the state last decided by run
@@ -138,9 +139,10 @@ var daemonSleeper *sleeper
 
 // newSleeper decides the initial state at once, so the goroutines started
 // after it (session watch, touch reactions) never see a stale "awake".
-func newSleeper(win *sleepWindow, c *mcp.Client) *sleeper {
+func newSleeper(win *sleepWindow, c *mcp.Client, avatar bool) *sleeper {
 	s := &sleeper{
 		c:         c,
+		avatar:    avatar,
 		st:        sleepState{win: win},
 		poke:      make(chan struct{}, 1),
 		reconnect: make(chan struct{}, 1),
@@ -184,6 +186,7 @@ const sleepScriptAttempts = 5
 
 // sleepSteps is what run still has to send to the device.
 type sleepSteps struct {
+	avatar   bool // send the avatar set for the state (tried once)
 	sensor   bool // set the touch sensor (retried until it succeeds)
 	script   bool // run sleep.txt / wake.txt (retried up to sleepScriptAttempts)
 	face     bool // awake reconnect without wake.txt: just restore restFace
@@ -197,7 +200,8 @@ type sleepSteps struct {
 // state anyway. On a reconnect while awake only the sensor and the face are
 // set, so a brightness changed by hand survives Wi-Fi drops; the first
 // connection after the daemon starts runs wake.txt too (the daemon may have
-// stopped while asleep).
+// stopped while asleep). Every new session and every change of state also
+// gets the avatar set for the state (the set lives in device RAM).
 func (s *sleeper) run(stop <-chan struct{}) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
@@ -211,14 +215,18 @@ func (s *sleeper) run(stop <-chan struct{}) {
 		want := s.want()
 		if want != s.asleep.Load() {
 			s.asleep.Store(want)
-			todo = sleepSteps{sensor: true, script: true}
+			todo = sleepSteps{avatar: true, sensor: true, script: true}
 			if want {
 				fmt.Fprintln(os.Stderr, "daemon: going to sleep")
 			} else {
 				fmt.Fprintln(os.Stderr, "daemon: waking up")
 			}
 		}
-		if (todo.sensor || todo.script || todo.face) && deviceIsConnected(s.c) {
+		if (todo.avatar || todo.sensor || todo.script || todo.face) && deviceIsConnected(s.c) {
+			if todo.avatar {
+				todo.avatar = false
+				s.loadAvatar(want)
+			}
 			s.apply(&todo, want)
 		}
 		select {
@@ -227,7 +235,7 @@ func (s *sleeper) run(stop <-chan struct{}) {
 		case <-t.C:
 		case <-s.poke:
 		case <-s.reconnect:
-			todo.sensor, todo.attempts = true, 0
+			todo.avatar, todo.sensor, todo.attempts = true, true, 0
 			if s.asleep.Load() || firstConnect {
 				todo.script = true
 			} else if !todo.script {
@@ -235,6 +243,29 @@ func (s *sleeper) run(stop <-chan struct{}) {
 			}
 			firstConnect = false
 		}
+	}
+}
+
+// loadAvatar sends the sleep set (~/.stackchan/avatar-sleep) while asleep, or
+// the default set. It is not retried: the firmware sometimes shows the new
+// face but never sends its "loaded" reply, so a timeout is not conclusive.
+// It runs outside stepMu, so touch reactions go on during the upload.
+func (s *sleeper) loadAvatar(asleep bool) {
+	if !s.avatar {
+		return
+	}
+	set := ""
+	if asleep {
+		if _, err := os.Stat(avatarDir("sleep")); err == nil {
+			set = "sleep"
+		} else {
+			fmt.Fprintf(os.Stderr, "daemon: no sleep avatar set (%s); make it with scripts/gen_avatars.py --sleep\n", avatarDir("sleep"))
+		}
+	}
+	if text, err := loadAvatarQuiet(s.c, set); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon: avatar load %q: %v\n", set, err)
+	} else {
+		fmt.Fprintf(os.Stderr, "daemon: avatar loaded %q %s\n", set, text)
 	}
 }
 
@@ -308,8 +339,10 @@ var defaultSleepScripts = map[string]string{
 	"sleep": `# 眠るとき（daemon --sleep の時刻になったとき、sleep コマンド）と、
 # 眠っている間に本体が繋ぎ直したときに実行する。
 # 頭のタッチセンサーは daemon が止めるので、ここには書かない。
+# 寝顔（~/.stackchan/avatar-sleep。scripts/gen_avatars.py --sleep で作る）は daemon が送る。
+# 寝顔を出さず画面を消すなら brightness 0 にする。
 clear-leds
-brightness 0
+brightness 10
 `,
 	"wake": `# 起きるとき（--sleep の時刻が終わったとき、wakeup コマンド）と、
 # daemon の起動後に初めて本体が繋がったときに実行する。

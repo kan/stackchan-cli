@@ -157,7 +157,8 @@ Commands:
   wait [--timeout N]     Keep the gateway up and wait for the device to connect
   move-head --yaw N --pitch N
   avatar <face>          idle|happy|thinking|sad|surprised|embarrassed|off
-  avatar-load            upload ~/.stackchan/avatar/*.png as the face set (lost on device reboot;
+  avatar-load [--set NAME]  upload ~/.stackchan/avatar/*.png (or avatar-NAME/, e.g. sleep)
+                         as the face set (lost on device reboot;
                          the daemon re-sends it automatically)
   mouth <shape>          closed|half|open|e|u
   blink <on|off>
@@ -1054,7 +1055,7 @@ func replHelp(w io.Writer) {
   status                         connection status
   tools                          list gateway tools
   avatar <face>                  idle|happy|thinking|sad|surprised|embarrassed|off
-  avatar-load                    upload ~/.stackchan/avatar/*.png as the face set
+  avatar-load [--set NAME]       upload ~/.stackchan/avatar/*.png (or avatar-NAME/) as the face set
   mouth <shape>                  closed|half|open|e|u
   blink <on|off>
   move-head --yaw N --pitch N    yaw -90..90, pitch 5..85

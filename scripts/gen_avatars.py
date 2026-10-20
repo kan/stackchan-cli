@@ -13,8 +13,12 @@ placeholder you can later replace with real art (same filenames).
 
 Run:  uv run --with pillow python scripts/gen_avatars.py
 Then: cd <firmware> && python scripts/avatar_convert/convert_avatars.py
+
+With --sleep, writes the sleep set (closed eyes and "Zzz" in every frame) to
+~/.stackchan/avatar-sleep/ instead; the daemon loads it while asleep.
 """
 import os
+import sys
 
 from PIL import Image, ImageDraw
 
@@ -82,6 +86,8 @@ def mouth(d, style):
         d.ellipse(bbox(cx, cy, 34, 10), fill=FG)
     elif style == "u":      # small round
         d.ellipse(bbox(cx, cy, 16, 18), fill=FG)
+    elif style == "breath":  # tiny, for the sleeping face
+        d.ellipse(bbox(cx, cy, 8, 7), fill=FG)
 
 
 def blush(d):
@@ -131,14 +137,53 @@ FRAMES = {
 }
 
 
-def main():
-    os.makedirs(OUT, exist_ok=True)
-    for name, (le, re, mo, extras) in FRAMES.items():
-        im = frame(le, re, mo, extras)
-        path = os.path.join(OUT, name + ".png")
+ZZZ = (120, 150, 200)    # muted blue for the sleep "Zzz"
+
+
+def zzz(d):  # three growing Z's rising to the upper right
+    for x, y, s in ((232, 70, 10), (252, 50, 14), (278, 26, 18)):
+        d.line([(x, y), (x + s, y), (x, y + s), (x + s, y + s)], fill=ZZZ, width=4)
+
+
+def sleep_eye(d, center):  # peaceful closed eye: a downward curve
+    cx, cy = center
+    d.arc(bbox(cx, cy - 6, 24, 16), 20, 160, fill=FG, width=7)
+
+
+def sleep_frame(mo):
+    im = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(im)
+    sleep_eye(d, LEYE)
+    sleep_eye(d, REYE)
+    mouth(d, mo)
+    zzz(d)
+    return im
+
+
+# The sleep set: every face and eye frame is the sleeping face, so blink and
+# set_avatar keep it; the mouth frames keep their shape (talking in its sleep).
+SLEEP_MOUTHS = {
+    "mouth_closed": "closed", "mouth_half": "half", "mouth_open": "open",
+    "mouth_e": "e", "mouth_u": "u",
+}
+SLEEP_OUT = os.path.join(os.path.expanduser("~"), ".stackchan", "avatar-sleep")
+
+
+def write_set(out, frames):
+    os.makedirs(out, exist_ok=True)
+    for name, im in frames.items():
+        path = os.path.join(out, name + ".png")
         im.save(path)
         print("wrote", path)
-    print(f"\n{len(FRAMES)} frames -> {OUT}")
+    print(f"\n{len(frames)} frames -> {out}")
+
+
+def main():
+    if "--sleep" in sys.argv[1:]:
+        frames = {name: sleep_frame(SLEEP_MOUTHS.get(name, "breath")) for name in FRAMES}
+        write_set(SLEEP_OUT, frames)
+        return
+    write_set(OUT, {name: frame(*spec) for name, spec in FRAMES.items()})
 
 
 if __name__ == "__main__":

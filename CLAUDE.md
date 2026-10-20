@@ -574,8 +574,13 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   スクリプトの実行時だけ `cmdEnv.deviceErrors` でこれを失敗として数える（他のコマンドの終了コードは従来どおり）。
 - タッチの反応と sleep の適用は `sleeper.stepMu` で直列にする（眠る瞬間の反応の LED が残らないように）。
 - 引数なしの `sleep` はスクリプト内でも眠る（音声ルール「おやすみ => sleep」などに使えるよう、あえて残している）。
-- 実機で確認済み: 眠る間 `get_touch_sensor_enabled` = false、`get_device_info` の brightness = 0。
-  `sleep` → `wakeup` でも同じく切り替わる。
+- 実機で確認済み: 眠る間 `get_touch_sensor_enabled` = false。`sleep` → `wakeup` でも同じく切り替わる。
+- 寝顔（ユーザー要望）: firmware の表情は 6 種類で増やせないので、14 枚すべてを寝顔にした一式
+  `~/.stackchan/avatar-sleep/`（`scripts/gen_avatars.py --sleep`）を眠るときに送り、起きるときに通常の一式に
+  戻す（各 2〜5 秒）。眠る間の明るさは 10（ユーザー確認済み）。
+- アバター一式の送信は `sleeper.loadAvatar` だけが行う（接続のたびと、眠る・起きるの切り替え時。
+  `watchSessions` は送らない）。スクリプトに `avatar-load` を書かないこと（二重送信と競合の元になった）。
+  送信は再試行せず、`stepMu` の外で行う（タッチの反応を止めないため）。
 
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`

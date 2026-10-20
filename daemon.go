@@ -150,11 +150,11 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 
 	// IPC is served right away; the device connection is only watched, so
 	// commands (e.g. status) never hang while the device is away.
-	sl := newSleeper(opts.sleep, c)
+	sl := newSleeper(opts.sleep, c, opts.avatar)
 	daemonSleeper = sl // before any command can run
 	fmt.Fprintf(os.Stderr, "daemon: sleeps %s and on the sleep command (touch sensor off, reactions sleep.txt / wake.txt)\n", opts.sleep)
 	go sl.run(stop)
-	go watchSessions(c, opts.avatar, sl, stop)
+	go watchSessions(c, sl, stop)
 	if opts.touch {
 		// One-slot queue: a touch during a reaction waits and is answered right
 		// after it; a newer touch replaces an older waiting one.
@@ -374,12 +374,12 @@ func (j *touchJudge) judge(ev touchEvent, now time.Time) (gesture, ignored strin
 	return "stroke", ""
 }
 
-// watchSessions logs device (re)connections and, when enabled, re-sends the
-// custom avatar set after each one: a loaded set lives in device RAM and is
-// gone after a reboot. A new connection is a new session_id (gateway ≥ 0.18
-// reports it, catching reconnects between polls) or a disconnected→connected
-// transition. sl then applies the sleep state (touch sensor, face, scripts).
-func watchSessions(c *mcp.Client, avatar bool, sl *sleeper, stop <-chan struct{}) {
+// watchSessions logs device (re)connections and has sl apply the state to
+// each one (avatar set, touch sensor, face, scripts): a loaded avatar set
+// lives in device RAM and is gone after a reboot. A new connection is a new
+// session_id (gateway ≥ 0.18 reports it, catching reconnects between polls)
+// or a disconnected→connected transition.
+func watchSessions(c *mcp.Client, sl *sleeper, stop <-chan struct{}) {
 	t := time.NewTicker(3 * time.Second)
 	defer t.Stop()
 	lastSession, wasConnected := "", false
@@ -391,17 +391,8 @@ func watchSessions(c *mcp.Client, avatar bool, sl *sleeper, stop <-chan struct{}
 			wasConnected, lastSession = connected, session
 			if isNew {
 				fmt.Fprintf(os.Stderr, "daemon: device connected (session %s)\n", session)
-				if avatar {
-					// The firmware sometimes shows the new face but never sends
-					// its "loaded" reply, so a timeout here is not conclusive.
-					if text, err := loadAvatarQuiet(c); err != nil {
-						fmt.Fprintf(os.Stderr, "daemon: avatar load: %v\n", err)
-					} else {
-						fmt.Fprintf(os.Stderr, "daemon: avatar loaded %s\n", text)
-					}
-				}
-				// The device comes up awake with its idle face; sl switches
-				// it to ours, or puts it back to sleep.
+				// The device comes up awake with its idle face and no avatar
+				// set; sl sends the set and face for the state.
 				sl.deviceConnected()
 			}
 		}
