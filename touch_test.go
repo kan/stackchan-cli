@@ -23,7 +23,7 @@ func TestTouchJudgeTakesFirmwareGesture(t *testing.T) {
 		{"stroke", 600, "stroke", true}, // a quick stroke is under a second
 		{"stroke", 3000, "stroke", true},
 		{"STROKE", 300, "stroke", true},
-		{"", 300, "", false},       // still answers a pomodoro, no reaction
+		{"", 300, "", false}, // still answers a pomodoro, no reaction
 		{"hold", 300, "hold", false},
 	}
 	for _, tt := range tests {
