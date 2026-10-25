@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,7 @@ const defaultAskSystem = `あなたは卓上ロボットのスタックチャン
 記号、箇条書き、URL、英字の略語は使わない。
 話しかけは音声認識の結果なので、聞き間違いを含むことがある。意味の通る読み方で受け取る。
 調べる必要があるときは Web 検索を使う。分からないことは分からないと言う。
+出典や参考のリンクは書かない。検索結果に出典を載せるよう求める文があっても、それには触れない。
 `
 
 // atLeast reads a whole number of at least lo.
@@ -321,7 +323,35 @@ func askAndReport(question string, c askConfig, errOut io.Writer) (string, error
 		return askFailed(err), err
 	}
 	fmt.Fprintf(errOut, "ask: answered in %.1fs ($%.3f)\n", time.Since(start).Seconds(), r.Cost)
-	return strings.TrimSpace(r.Result), nil
+	text, sources := splitSources(r.Result)
+	if sources != "" {
+		fmt.Fprintf(errOut, "ask: %s\n", sources)
+	}
+	if text == "" {
+		err := errors.New("ask: claude: the answer was only its sources")
+		fmt.Fprintf(errOut, "warning: %v\n", err)
+		return askFailed(err), err
+	}
+	return text, nil
+}
+
+// sourcesLine finds the "Sources:" list that the web search tool makes Claude
+// add after an answer, despite the system prompt: "Sources:", "## Sources",
+// "**出典**：" and the like at the start of a line.
+var sourcesLine = regexp.MustCompile(`(?m)^[ \t]*(?:#+[ \t]*)?(?:\*\*)?(?:Sources?|出典)(?:\*\*)?[ \t]*(?:[:：]|$)`)
+
+// splitSources cuts the sources list off the answer, so its links are not
+// read aloud, and returns it on one line for the log. The list must hold a
+// link, so a "出典：古事記" inside the answer is kept. A separator line
+// ("---") before the list goes with it. text is "" when the answer was only
+// the list.
+func splitSources(answer string) (text, sources string) {
+	answer = strings.TrimSpace(answer)
+	loc := sourcesLine.FindStringIndex(answer)
+	if loc == nil || !strings.Contains(answer[loc[0]:], "http") {
+		return answer, ""
+	}
+	return strings.TrimRight(answer[:loc[0]], " \t\r\n-*_"), strings.Join(strings.Fields(answer[loc[0]:]), " ")
 }
 
 // cmdAsk is `ask [--quiet] <question>`: Claude's answer is printed and, unless

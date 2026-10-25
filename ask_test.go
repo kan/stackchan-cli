@@ -296,3 +296,23 @@ func TestCmdAskQuiet(t *testing.T) {
 		t.Error("an empty question was accepted")
 	}
 }
+
+func TestSplitSources(t *testing.T) {
+	for _, c := range []struct{ in, text, sources string }{
+		{"晴れだよ。", "晴れだよ。", ""},
+		{"晴れだよ。\n\nSources:\n- [天気](https://example.com/a)\n- [b](https://example.com/b)",
+			"晴れだよ。", "Sources: - [天気](https://example.com/a) - [b](https://example.com/b)"},
+		{"雨だよ。\n\nSources: [ウェザー](https://example.com/w)", "雨だよ。", "Sources: [ウェザー](https://example.com/w)"},
+		{"雨だよ。\n**Sources:**\n- https://example.com", "雨だよ。", "**Sources:** - https://example.com"},
+		{"雨だよ。\n\n---\n\n## Sources\n- [a](https://example.com)", "雨だよ。", "## Sources - [a](https://example.com)"},
+		{"雨だよ。\nSource: https://example.com", "雨だよ。", "Source: https://example.com"},
+		{"Sources: [a](https://example.com)", "", "Sources: [a](https://example.com)"},
+		{"Sourcesという言葉はね。", "Sourcesという言葉はね。", ""},
+		{"古い言葉だよ。\n出典：古事記。\nその後も使われたよ。", "古い言葉だよ。\n出典：古事記。\nその後も使われたよ。", ""},
+	} {
+		text, sources := splitSources(c.in)
+		if text != c.text || sources != c.sources {
+			t.Errorf("splitSources(%q) = %q, %q; want %q, %q", c.in, text, sources, c.text, c.sources)
+		}
+	}
+}
