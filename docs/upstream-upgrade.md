@@ -31,18 +31,21 @@ pwsh scripts/install-gateway.ps1 -Version <版>
 `uv tool install --force` は環境を作り直すので、スクリプトは `av<19` と CUDA のライブラリもまとめて入れ直し、
 最後に版と依存の版を表示する。`opus.dll` が無ければ警告する。既定の版はスクリプトの `$Version` で、上げたら書き換える。
 
-## 4. firmware のアプリ部分を書き込む
+## 4. firmware をビルドして書き込む
 
-自分でビルドするまで（issue #11）は、ビルド済みのリリースのアプリ部分だけを書き込み、NVS（Wi-Fi と gateway の URL）を残す。
+firmware は upstream のタグにこの repo の `firmware-patches/*.patch` を当ててビルドする（issue #11。wake word と話し終わりの判定）。
+アプリ（`0x20000`）と assets（`0x800000`、wake word のモデルを含む）だけを書き込み、NVS（Wi-Fi と gateway の URL）を残す。
 
 ```
-gh release download firmware-v<版> -R kisaragi-mochi/stackchan-mcp -p merged-binary.bin -p xiaozhi.bin -D firmware/v<版>
-esptool --chip esp32s3 --port COM3 --before default-reset --after hard-reset write-flash 0x20000 firmware/v<版>/xiaozhi.bin *> firmware/v<版>/flash.log
+wsl -d Ubuntu-22.04 -- bash /mnt/c/Users/<you>/stackchan-cli/scripts/build-firmware.sh firmware-v<版>
+esptool --chip esp32s3 --port COM3 --before default-reset --after hard-reset write-flash 0x20000 firmware/firmware-v<版>-local/xiaozhi.bin 0x800000 firmware/firmware-v<版>-local/assets.bin *> firmware/firmware-v<版>-local/flash.log
 ```
 
-- `firmware/` は git 管理外。
-- assets（`0x800000` から後ろ）が前の版と違うときだけ、`merged-binary.bin` の `0x800000` から後ろを切り出して書き込む。
-  1.17.0 と 1.18.0 は同じだった。パーティション表（`0x8000`）が変わっていたら、アプリだけの書き込みはしない。
+- `firmware/` は git 管理外。ビルドは WSL の Docker（`espressif/idf:v5.5.2`）で行い、upstream の host test も実行する。
+- パッチが当たらなくなったら（upstream の変更とぶつかったら）、`~/stackchan-mcp` で `git checkout -B local firmware-v<版>` →
+  `git am <repo>/firmware-patches/*.patch`（ぶつかったところを直して `git am --continue`）→ `git format-patch --no-signature -o <repo>/firmware-patches firmware-v<版>..local`
+  で作り直す（古いパッチのファイルは消してから書き出す）。upstream に取り込まれた変更はパッチから外す。
+- パーティション表（`0x8000`）が前の版から変わっていたら、アプリと assets だけの書き込みはしない（`merged-binary.bin` を `0x0` に書き込み、Wi-Fi などを設定し直す）。
 - **書き込んだあと、もう一度本体を再起動する**（`esptool --chip esp32s3 --port COM3 --before default-reset --after hard-reset chip-id`）。
   1.18.0 の書き込み直後は本体の通信が遅く、アバターの送信に 90〜110 秒かかった（再起動後は 3 秒）。
 
@@ -63,7 +66,8 @@ Start-ScheduledTask -TaskName StackchanDaemon
 | 聞き取り | `stackchan-cli listen --sec 5` で話す | `heard: ...` に話した文が出る |
 | 頭のタッチ | 頭をタップ、なでる | daemon.log に `touch tap` / `touch stroke` が出て反応する |
 | 音声コマンド | 画面をタップして「今何時」と話し、もう一度タップ | 時刻を答える |
-| 眠る／起きる | `stackchan-cli sleep` → `call get_touch_sensor_enabled` → `wakeup` | `enabled` が false → true。寝顔と通常の顔に切り替わる |
+| 呼びかけ | 「Hi, Stack Chan」のあとに「今何時」と話し、黙る | 話し終わって約 1 秒で聞き取りが止まり、時刻を答える |
+| 眠る／起きる | `stackchan-cli sleep` → `call get_touch_sensor_enabled` → `wakeup` | `enabled` が false → true。寝顔と通常の顔に切り替わる。眠っている間は「Hi, Stack Chan」に応じない |
 | タイマー | `stackchan-cli timer 15s` | 15 秒後に知らせる |
 
 ## 6. 記録を直す

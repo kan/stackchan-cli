@@ -647,7 +647,8 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 夜中に約 52 分おきに「なでる」（2〜6 秒）の誤検出が 2 回ずつ続き、反応していた（daemon.log で確認）。
   原因は未調査。
 - daemon `--sleep HH:MM-HH:MM`（既定 `00:00-07:00`、`off` で時間帯なし、`sleep.go`）。眠る間は
-  `set_touch_sensor_enabled false`（NVS 保存。本体自身のタッチ動作と通知の両方が止まる）と
+  `set_touch_sensor_enabled false`（NVS 保存。本体自身のタッチ動作と通知の両方が止まる。自前の firmware では
+  wake word もこの設定に従う。「2026-10-26 更新log」）と
   `reactions/sleep.txt`（LED 消灯、`brightness 0`）。起きるとセンサーを戻して `wake.txt`
   （`brightness 100`、`avatar embarrassed`）。
 - `stackchan-cli sleep`（引数なし）で時刻に関係なく眠り、`wakeup` まで起きない（ユーザー要望）。
@@ -789,6 +790,37 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   （指がゾーンをまたがなかったとみられる）。
 - 本体のシリアルログ（`touch raw: 0x00 -> 0x30`、`touch event: STROKE start_zones=... duration=300 ms`）で、本体の判定を
   確かめられる。反応で本体が動くと COM3 が切れて読み取りが止まる。
+
+## 2026-10-26 更新log（自前の firmware ビルド・wake word・issue #11）
+
+- firmware は upstream のタグに `firmware-patches/*.patch` を当てて自分でビルドする（#12 で決めた取り込み方）。
+  `scripts/build-firmware.sh`（WSL で実行。ESP-IDF は Docker の `espressif/idf:v5.5.2`。upstream と自前の host test も回す）。
+  手順と書き込み（アプリ `0x20000` と assets `0x800000`）は `docs/upstream-upgrade.md`。
+  - パッチを作る作業用のクローンは WSL の `~/stackchan-mcp`（ブランチ `local` = タグ + パッチごとに 1 コミット）、ビルドは
+    別の作業ツリー `~/stackchan-mcp-build` に `git apply` で当てる（コミットを作らない。作り捨てのコミットに署名しないため）。
+  - パッチを変えたら `git format-patch --no-signature -o <repo>/firmware-patches firmware-v1.18.0..local`（古いファイルは消してから）。
+  - 何も当てない 1.18.0 を自分でビルドすると、リリースの `xiaozhi.bin` と 69 バイト（ビルドの日時など）だけ違った。
+- 落とし穴（Git Bash から `wsl.exe` を呼ぶとき）: `MSYS_NO_PATHCONV=1` が無いと `/home/...` が Windows のパスに書き換わる。
+  `wsl ... bash -lc '...'` の中の `$変数` は WSL の bash に届く前に展開されて空になる（`$PWD` が Windows の作業フォルダに
+  なり、Docker に別のフォルダがマウントされた）。変数を使う処理はスクリプトのファイルにする。WSL の `git-ssh-sign` は
+  ログインシェル（`bash -l`）の PATH にしか無い。
+- パッチ（ユーザー決定: 呼びかけは「Hi, Stack Chan」、wake word の音声は送らない、眠る間は止める）:
+  1. 呼びかけを「你好小智」から「Hi, Stack Chan」（esp-sr 2.3.1 の `wn9_histackchan_tts3`）に替え、`SEND_WAKE_WORD_DATA` を無効にする
+     （board の `config.json`）。モデルは assets に入るので、assets も書き込む。
+  2. wake word で始まった聞き取りを、本体が声の有無（AFE の VAD）で止める（`listen_end_detector.h`、100ms ごと）。声のあとに 1 秒の沈黙、
+     5 秒声が無い、10 秒の上限のどれか。始めの 0.7 秒と、そのあと VAD が一度沈黙を報告するまでの声は数えない（聞き取りを始めるときの
+     ポップ音。この board には AEC が無く、VAD は遅れて追うので、0.7 秒を過ぎても「声」が残り、ポップ音だけ録って止まっていた）。
+     画面タップと gateway の `listen` の聞き取りは今までどおり。
+  3. 頭のタッチセンサーが無効の間は wake word を無視する（`Board::IsWakeWordEnabled`）。gateway には wake word のツールが無く、
+     daemon は眠る間タッチセンサーを切るので、daemon を変えずに眠る間は応じなくなる。昼間にタッチセンサーを切ると wake word も止まる。
+  4. WakeNet の感度を `DET_MODE_95` にする（Kconfig `WAKE_WORD_DET_MODE_95`）。
+  5. upstream の不具合の修正: `ContinueWakeWordInvoke` が「接続中」の状態しか受け付けず、gateway との接続が開いたまま（1 回目の
+     聞き取りのあとは常にそう）の 2 回目以降の wake word を捨てていた。
+- 実機の結果（2026-10-26）: 眠っている間は検出しても応じない。起きている間は 5 回中 5 回検出し、5 回とも話し終わりで止まった。
+  「今何時」の文字起こしは 5 回中 3 回が正しく、2 回は「一番安心。」「いいマランジー」（「なんじ」が「らんじー」になる）。
+  最初の数回の試しで「ほとんど応じない」となったのは、5 の不具合（と、その修正を別の関数に入れていたこと）のため。
+- 書き込みや再起動のあと、本体の通信が遅い状態（アバターの送信が 60 秒以上、時間切れ）になることが今回も何度かあった。
+  もう一度再起動すると直る（2〜3 秒）。原因は未調査。
 
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`

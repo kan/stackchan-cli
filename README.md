@@ -147,6 +147,9 @@ stackchan-cli say "やっほー"
   （例: 「笑って」で `avatar happy`）。書式は `キーワード|別の書き方 => コマンド; コマンド`。
   上の行ほど優先で、`*` の行はどれにも当たらなかったときに実行する。daemon の初回起動時に雛形を生成し、
   保存すれば次の聞き取りから反映される。文字起こしの間は考えている顔（thinking）になる。
+  - 自前の firmware（`firmware-patches/`、`scripts/build-firmware.sh`）なら、画面のタップの代わりに
+    「**Hi, Stack Chan**」と呼びかけてから話してもよい。話し終わって約 1 秒で本体が聞き取りを止める。
+    眠っている間（頭のタッチセンサーが無効の間）は呼びかけに応じない。
   - gateway が音声を `STACKCHAN_AUDIO_HOOK_URL`（daemon が `127.0.0.1:8771` で受ける）へ送り、
     daemon が gateway の Python に入っている faster-whisper で文字にする。daemon はモデルを読み込んだ
     Python を常駐させるので、文字起こしは CPU で約 2 秒、GPU で約 0.2 秒。

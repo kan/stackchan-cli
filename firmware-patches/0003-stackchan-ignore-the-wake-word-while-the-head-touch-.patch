@@ -1,0 +1,46 @@
+From 4ff71d4b677d71000c452f55ed68a73e9db8a847 Mon Sep 17 00:00:00 2001
+From: stackchan-cli <stackchan-cli@localhost>
+Date: Sun, 25 Oct 2026 23:59:36 +0900
+Subject: [PATCH 3/5] stackchan: ignore the wake word while the head-touch
+ sensor is off
+
+---
+ firmware/main/boards/common/board.h         | 4 ++++
+ firmware/main/boards/stackchan/stackchan.cc | 9 +++++++++
+ 2 files changed, 13 insertions(+)
+
+diff --git a/firmware/main/boards/common/board.h b/firmware/main/boards/common/board.h
+index c401c80..8ac1c73 100644
+--- a/firmware/main/boards/common/board.h
++++ b/firmware/main/boards/common/board.h
+@@ -95,6 +95,10 @@ public:
+     // and MCP dispatch paths to wake and re-arm its screen-off timer.
+     virtual void OnUserActivity() {}
+ 
++    // Whether a detected wake word may start listening. Detection keeps
++    // running either way; Application ignores the wake word while false.
++    virtual bool IsWakeWordEnabled() { return true; }
++
+     // Phase 4.5 avatar (saiverse-stackchan-addon): dynamic avatar set fetch
+     // notification dispatched from Application::OnIncomingJson. The cJSON
+     // object carries url / token / mode / checksum / expected_size fields
+diff --git a/firmware/main/boards/stackchan/stackchan.cc b/firmware/main/boards/stackchan/stackchan.cc
+index 8e7930a..938db61 100644
+--- a/firmware/main/boards/stackchan/stackchan.cc
++++ b/firmware/main/boards/stackchan/stackchan.cc
+@@ -8240,6 +8240,15 @@ public:
+         StopTtsLipSync();
+     }
+ 
++    // stackchan-cli: the wake word follows the head-touch enable flag. The
++    // gateway relays self.robot.set_touch_sensor_enabled but has no tool of
++    // its own for the wake word, and the host turns touch off while the
++    // robot sleeps, so this keeps the robot from waking up to night-time
++    // speech without a gateway change.
++    virtual bool IsWakeWordEnabled() override {
++        return touch_sensor_enabled_.load(std::memory_order_acquire);
++    }
++
+     // Phase 4.5 avatar (saiverse-stackchan-addon): handle the gateway's
+     // `avatar_set_fetch` WS message. Parse url/token/mode/checksum/
+     // expected_size, spawn a worker task that performs HTTP GET + SHA256

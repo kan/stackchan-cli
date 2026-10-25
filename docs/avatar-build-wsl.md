@@ -1,5 +1,9 @@
 # 自作アバター入りファームを WSL でビルドする手順
 
+> **古い手順（firmware v1.8.0 のころ）。** v1.17.0 以降はアバターをビルドに埋め込まず、daemon が実行時に送る
+> （CLAUDE.md「2026-10-17 更新log」）。今の firmware のビルドは `scripts/build-firmware.sh`（WSL + Docker、
+> この repo のパッチを当てる）で行う。手順は `docs/upstream-upgrade.md`。
+
 プリビルドの `merged-binary` はアバター画像が**黒プレースホルダ**なので、`set_avatar` で
 顔が変化しない。自分の顔画像を C 配列に焼き込むには **ESP-IDF でソースビルド**が必要。
 ここでは WSL(Ubuntu) + ESP-IDF v5.5.2 でビルドし、Windows 側 esptool で書き込む。

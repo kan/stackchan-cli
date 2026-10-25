@@ -1,0 +1,32 @@
+From 12e2e36b956d695a830f6f3c0cd4f6f4432e88d6 Mon Sep 17 00:00:00 2001
+From: stackchan-cli <stackchan-cli@localhost>
+Date: Mon, 26 Oct 2026 00:21:35 +0900
+Subject: [PATCH 5/5] Answer every wake word while the audio channel stays
+ open, not only the first
+
+---
+ firmware/main/application.cc | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/firmware/main/application.cc b/firmware/main/application.cc
+index 836ef77..a6be5f9 100644
+--- a/firmware/main/application.cc
++++ b/firmware/main/application.cc
+@@ -1048,8 +1048,15 @@ void Application::HandleWakeWordDetectedEvent() {
+ }
+ 
+ void Application::ContinueWakeWordInvoke(const std::string& wake_word, uint32_t generation) {
+-    // Check state again in case it was changed during scheduling
+-    if (GetDeviceState() != kDeviceStateConnecting || !IsListeningRequestCurrent(generation)) {
++    // Check state again in case it was changed during scheduling.
++    // stackchan-cli: HandleWakeWordDetectedEvent calls this directly, still in
++    // Idle, when the audio channel is already open. With the gateway the
++    // channel stays open after the first session, so accepting only
++    // Connecting here dropped every wake word after the first one.
++    auto state = GetDeviceState();
++    bool expected_state = state == kDeviceStateConnecting ||
++        (state == kDeviceStateIdle && protocol_->IsAudioChannelOpened());
++    if (!expected_state || !IsListeningRequestCurrent(generation)) {
+         listening_profile_ = ListeningProfileAfterStop(listening_profile_);
+         return;
+     }

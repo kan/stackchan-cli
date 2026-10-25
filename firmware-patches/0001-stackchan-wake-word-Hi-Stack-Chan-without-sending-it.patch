@@ -1,0 +1,26 @@
+From 9624a29309ed9c6c72818d91296caceb6eb5c11b Mon Sep 17 00:00:00 2001
+From: stackchan-cli <stackchan-cli@localhost>
+Date: Sun, 25 Oct 2026 23:59:35 +0900
+Subject: [PATCH 1/5] stackchan: wake word "Hi, Stack Chan", without sending
+ its audio
+
+---
+ firmware/main/boards/stackchan/config.json | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/firmware/main/boards/stackchan/config.json b/firmware/main/boards/stackchan/config.json
+index 5cc538f..c520b72 100644
+--- a/firmware/main/boards/stackchan/config.json
++++ b/firmware/main/boards/stackchan/config.json
+@@ -9,7 +9,10 @@
+                 "CONFIG_CAMERA_GC0308=y",
+                 "CONFIG_CAMERA_GC0308_AUTO_DETECT_DVP_INTERFACE_SENSOR=y",
+                 "CONFIG_CAMERA_GC0308_DVP_YUV422_320X240_20FPS=y",
+-                "CONFIG_STACKCHAN_SERVO_FEETECH=y"
++                "CONFIG_STACKCHAN_SERVO_FEETECH=y",
++                "CONFIG_SR_WN_WN9_NIHAOXIAOZHI_TTS=n",
++                "CONFIG_SR_WN_WN9_HISTACKCHAN_TTS3=y",
++                "CONFIG_SEND_WAKE_WORD_DATA=n"
+             ]
+         }
+     ]

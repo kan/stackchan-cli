@@ -1,0 +1,507 @@
+From 7a1748d4e26d885b6a1c787e7d2b8bc2a9f614c9 Mon Sep 17 00:00:00 2001
+From: stackchan-cli <stackchan-cli@localhost>
+Date: Sun, 25 Oct 2026 23:59:36 +0900
+Subject: [PATCH 2/5] End a wake-word listening session on the device when the
+ user stops talking
+
+---
+ firmware/host_test/CMakeLists.txt             |  14 ++
+ .../host_test/test_listen_end_detector.cc     | 134 ++++++++++++++++++
+ firmware/main/application.cc                  |  77 +++++++++-
+ firmware/main/application.h                   |  10 ++
+ firmware/main/audio/audio_service.h           |   4 +-
+ firmware/main/listen_end_detector.h           | 103 ++++++++++++++
+ 6 files changed, 339 insertions(+), 3 deletions(-)
+ create mode 100644 firmware/host_test/test_listen_end_detector.cc
+ create mode 100644 firmware/main/listen_end_detector.h
+
+diff --git a/firmware/host_test/CMakeLists.txt b/firmware/host_test/CMakeLists.txt
+index ccc231d..0002a30 100644
+--- a/firmware/host_test/CMakeLists.txt
++++ b/firmware/host_test/CMakeLists.txt
+@@ -76,8 +76,22 @@ target_link_libraries(power_save_gate_test
+     PRIVATE GTest::gtest_main
+ )
+ 
++add_executable(listen_end_detector_test
++    test_listen_end_detector.cc
++)
++
++target_include_directories(listen_end_detector_test
++    PRIVATE
++        ../main
++)
++
++target_link_libraries(listen_end_detector_test
++    PRIVATE GTest::gtest_main
++)
++
+ include(GoogleTest)
+ gtest_discover_tests(mdns_candidate_extract_test)
+ gtest_discover_tests(listening_profile_test)
+ gtest_discover_tests(touch_gesture_test)
+ gtest_discover_tests(power_save_gate_test)
++gtest_discover_tests(listen_end_detector_test)
+diff --git a/firmware/host_test/test_listen_end_detector.cc b/firmware/host_test/test_listen_end_detector.cc
+new file mode 100644
+index 0000000..54b44e8
+--- /dev/null
++++ b/firmware/host_test/test_listen_end_detector.cc
+@@ -0,0 +1,134 @@
++#include "listen_end_detector.h"
++
++#include <gtest/gtest.h>
++
++#include <cstdint>
++
++namespace {
++
++using stackchan::ListenEnd;
++using stackchan::ListenEndDetector;
++
++constexpr int64_t kTick = 100;
++
++// Feeds `speaking` every tick from `from` (inclusive) to `to` (exclusive) and
++// returns the first end reason with the time it was reported.
++struct Outcome {
++    ListenEnd end = ListenEnd::kNone;
++    int64_t at = -1;
++};
++
++Outcome Feed(ListenEndDetector& d, int64_t from, int64_t to, bool speaking) {
++    for (int64_t t = from; t < to; t += kTick) {
++        ListenEnd end = d.Update(t, speaking);
++        if (end != ListenEnd::kNone) {
++            return {end, t};
++        }
++    }
++    return {};
++}
++
++TEST(ListenEndDetector, StopsAfterSilenceFollowingSpeech) {
++    ListenEndDetector d;
++    d.Start(0);
++    EXPECT_EQ(Feed(d, 0, 1000, false).end, ListenEnd::kNone);
++    EXPECT_EQ(Feed(d, 1000, 3000, true).end, ListenEnd::kNone);
++    Outcome r = Feed(d, 3000, 6000, false);
++    EXPECT_EQ(r.end, ListenEnd::kSilence);
++    EXPECT_EQ(r.at, 4000);  // 1 s after the speech ended
++    EXPECT_FALSE(d.active());
++}
++
++TEST(ListenEndDetector, ShortPauseDoesNotStop) {
++    ListenEndDetector d;
++    d.Start(0);
++    Feed(d, 0, 1000, false);
++    Feed(d, 1000, 2000, true);
++    EXPECT_EQ(Feed(d, 2000, 2500, false).end, ListenEnd::kNone);  // 0.5 s pause
++    EXPECT_EQ(Feed(d, 2500, 3500, true).end, ListenEnd::kNone);
++    Outcome r = Feed(d, 3500, 6000, false);
++    EXPECT_EQ(r.end, ListenEnd::kSilence);
++    EXPECT_EQ(r.at, 4500);
++}
++
++TEST(ListenEndDetector, StopsWhenNothingIsSaid) {
++    ListenEndDetector d;
++    d.Start(0);
++    Outcome r = Feed(d, 0, 10000, false);
++    EXPECT_EQ(r.end, ListenEnd::kNoSpeech);
++    EXPECT_EQ(r.at, 5000);
++}
++
++TEST(ListenEndDetector, StartSoundIsNotSpeech) {
++    ListenEndDetector d;
++    d.Start(0);
++    // The popup at the start, then silence: no speech was heard.
++    EXPECT_EQ(Feed(d, 0, 600, true).end, ListenEnd::kNone);
++    Outcome r = Feed(d, 600, 10000, false);
++    EXPECT_EQ(r.end, ListenEnd::kNoSpeech);
++}
++
++TEST(ListenEndDetector, LateVadOnStartSoundIsNotSpeech) {
++    // Seen on the device: the VAD reported the popup as speech until 0.8 s,
++    // past the ignored window, and the session stopped 1 s later with only
++    // the popup recorded.
++    ListenEndDetector d;
++    d.Start(0);
++    EXPECT_EQ(Feed(d, 0, 900, true).end, ListenEnd::kNone);
++    EXPECT_EQ(Feed(d, 900, 2500, false).end, ListenEnd::kNone);
++    EXPECT_EQ(Feed(d, 2500, 3500, true).end, ListenEnd::kNone);  // the user
++    Outcome r = Feed(d, 3500, 8000, false);
++    EXPECT_EQ(r.end, ListenEnd::kSilence);
++    EXPECT_EQ(r.at, 4500);
++}
++
++TEST(ListenEndDetector, SpeechThroughTheStartSoundCounts) {
++    // Talking straight through the popup: voice still there at 1.5 s is the
++    // user, and the session ends 1 s after they stop.
++    ListenEndDetector d;
++    d.Start(0);
++    EXPECT_EQ(Feed(d, 0, 2000, true).end, ListenEnd::kNone);
++    Outcome r = Feed(d, 2000, 10000, false);
++    EXPECT_EQ(r.end, ListenEnd::kSilence);
++    EXPECT_EQ(r.at, 3000);
++}
++
++TEST(ListenEndDetector, LongSpeechThroughTheStartSoundIsNotCutAtNoSpeech) {
++    ListenEndDetector d;
++    d.Start(0);
++    EXPECT_EQ(Feed(d, 0, 6000, true).end, ListenEnd::kNone);  // past the 5 s no-speech limit
++    Outcome r = Feed(d, 6000, 10000, false);
++    EXPECT_EQ(r.end, ListenEnd::kSilence);
++    EXPECT_EQ(r.at, 7000);
++}
++
++TEST(ListenEndDetector, StopsAtTheMaximum) {
++    ListenEndDetector d;
++    d.Start(0);
++    Feed(d, 0, 1000, false);
++    Outcome r = Feed(d, 1000, 20000, true);  // never stops talking
++    EXPECT_EQ(r.end, ListenEnd::kMax);
++    EXPECT_EQ(r.at, 10000);
++}
++
++TEST(ListenEndDetector, ReportsOnceAndRestarts) {
++    ListenEndDetector d;
++    d.Start(0);
++    EXPECT_EQ(Feed(d, 0, 10000, false).end, ListenEnd::kNoSpeech);
++    EXPECT_EQ(d.Update(10000, false), ListenEnd::kNone);  // stopped itself
++
++    d.Start(20000);
++    EXPECT_TRUE(d.active());
++    Outcome r = Feed(d, 20000, 30000, false);
++    EXPECT_EQ(r.end, ListenEnd::kNoSpeech);
++    EXPECT_EQ(r.at, 25000);
++}
++
++TEST(ListenEndDetector, StoppedDetectorReportsNothing) {
++    ListenEndDetector d;
++    d.Start(0);
++    d.Stop();
++    EXPECT_EQ(Feed(d, 0, 20000, false).end, ListenEnd::kNone);
++}
++
++}  // namespace
+diff --git a/firmware/main/application.cc b/firmware/main/application.cc
+index 94dea37..836ef77 100644
+--- a/firmware/main/application.cc
++++ b/firmware/main/application.cc
+@@ -64,6 +64,18 @@ Application::Application() {
+         .skip_unhandled_events = true
+     };
+     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
++
++    esp_timer_create_args_t listen_end_timer_args = {
++        .callback = [](void* arg) {
++            Application* app = (Application*)arg;
++            xEventGroupSetBits(app->event_group_, MAIN_EVENT_LISTEN_END_CHECK);
++        },
++        .arg = this,
++        .dispatch_method = ESP_TIMER_TASK,
++        .name = "listen_end_timer",
++        .skip_unhandled_events = true
++    };
++    esp_timer_create(&listen_end_timer_args, &listen_end_timer_);
+ }
+ 
+ Application::~Application() {
+@@ -71,6 +83,10 @@ Application::~Application() {
+         esp_timer_stop(clock_timer_handle_);
+         esp_timer_delete(clock_timer_handle_);
+     }
++    if (listen_end_timer_ != nullptr) {
++        esp_timer_stop(listen_end_timer_);
++        esp_timer_delete(listen_end_timer_);
++    }
+     vEventGroupDelete(event_group_);
+ }
+ 
+@@ -200,7 +216,8 @@ void Application::Run() {
+         MAIN_EVENT_START_LISTENING |
+         MAIN_EVENT_STOP_LISTENING |
+         MAIN_EVENT_ACTIVATION_DONE |
+-        MAIN_EVENT_STATE_CHANGED;
++        MAIN_EVENT_STATE_CHANGED |
++        MAIN_EVENT_LISTEN_END_CHECK;
+ 
+     while (true) {
+         auto bits = xEventGroupWaitBits(event_group_, ALL_EVENTS, pdTRUE, pdFALSE, portMAX_DELAY);
+@@ -257,6 +274,10 @@ void Application::Run() {
+             }
+         }
+ 
++        if (bits & MAIN_EVENT_LISTEN_END_CHECK) {
++            HandleListenEndCheckEvent();
++        }
++
+         if (bits & MAIN_EVENT_SCHEDULE) {
+             std::unique_lock<std::mutex> lock(mutex_);
+             auto tasks = std::move(main_tasks_);
+@@ -933,6 +954,36 @@ void Application::HandleStopListeningEvent() {
+     }
+ }
+ 
++void Application::StartListenEndCheck() {
++    listen_end_.Start(esp_timer_get_time() / 1000);
++    // esp_timer_stop returns ESP_ERR_INVALID_STATE when not running, and both
++    // return ESP_ERR_INVALID_ARG on a null handle (timer creation failed).
++    esp_timer_stop(listen_end_timer_);
++    esp_timer_start_periodic(listen_end_timer_, 100 * 1000);
++}
++
++// The only place the check ends: when the session ended, and on the next tick
++// after the device left listening some other way (a tap, the 30 s stop).
++void Application::StopListenEndCheck() {
++    wake_word_session_ = false;
++    listen_end_.Stop();
++    esp_timer_stop(listen_end_timer_);
++}
++
++void Application::HandleListenEndCheckEvent() {
++    if (GetDeviceState() != kDeviceStateListening || !wake_word_session_) {
++        StopListenEndCheck();
++        return;
++    }
++    auto end = listen_end_.Update(esp_timer_get_time() / 1000, audio_service_.IsVoiceDetected());
++    if (end == stackchan::ListenEnd::kNone) {
++        return;
++    }
++    ESP_LOGI(TAG, "Wake-word listening ended: %s", stackchan::ListenEndName(end));
++    StopListenEndCheck();
++    StopListening();
++}
++
+ void Application::HandleWakeWordDetectedEvent() {
+     if (!protocol_) {
+         return;
+@@ -948,6 +999,15 @@ void Application::HandleWakeWordDetectedEvent() {
+     auto wake_word = audio_service_.GetLastWakeWord();
+     ESP_LOGI(TAG, "Wake word detected: %s (state: %d)", wake_word.c_str(), (int)state);
+ 
++    // stackchan-cli: the board can turn the wake word off (StackChan: while
++    // the head-touch sensor is off, i.e. while the robot sleeps).
++    if (!Board::GetInstance().IsWakeWordEnabled()) {
++        ESP_LOGI(TAG, "Wake word ignored: disabled by the board");
++        // Detection stops itself on a hit; keep listening for the next one.
++        audio_service_.EnableWakeWordDetection(true);
++        return;
++    }
++
+     if (state == kDeviceStateIdle) {
+         audio_service_.EncodeWakeWord();
+         auto wake_word = audio_service_.GetLastWakeWord();
+@@ -978,6 +1038,7 @@ void Application::HandleWakeWordDetectedEvent() {
+         } else {
+             // Play popup sound and start listening again
+             play_popup_on_listening_ = true;
++            wake_word_session_ = true;  // stackchan-cli: ended on the device
+             SetListeningMode(GetDefaultListeningMode());
+         }
+     } else if (state == kDeviceStateActivating) {
+@@ -1010,6 +1071,7 @@ void Application::ContinueWakeWordInvoke(const std::string& wake_word, uint32_t
+     }
+ 
+     ESP_LOGI(TAG, "Wake word detected: %s", wake_word.c_str());
++    wake_word_session_ = true;  // stackchan-cli: ended on the device (ListenEndDetector)
+ #if CONFIG_SEND_WAKE_WORD_DATA
+     // Encode and send the wake word data to the server
+     while (auto packet = audio_service_.PopWakeWordPacket()) {
+@@ -1034,10 +1096,13 @@ void Application::HandleStateChangedEvent() {
+     auto display = board.GetDisplay();
+     auto led = board.GetLed();
+     led->OnStateChanged();
+-    
++
+     switch (new_state) {
+         case kDeviceStateUnknown:
+         case kDeviceStateIdle:
++            // stackchan-cli: a session that ended (or never reached the
++            // Listening case below) must not leave the flag for the next one.
++            StopListenEndCheck();
+             display->SetStatus(Lang::Strings::STANDBY);
+             display->ClearChatMessages();  // Clear messages first
+             display->SetEmotion("neutral"); // Then set emotion (wechat mode checks child count)
+@@ -1091,9 +1156,17 @@ void Application::HandleStateChangedEvent() {
+                 play_popup_on_listening_ = false;
+                 audio_service_.PlaySound(Lang::Sounds::OGG_POPUP);
+             }
++
++            // stackchan-cli: the gateway never ends a wake-word session (taps
++            // and the gateway's listen end themselves), so end it here when
++            // the user is done.
++            if (wake_word_session_ && !is_raw_profile) {
++                StartListenEndCheck();
++            }
+             break;
+         }
+         case kDeviceStateSpeaking:
++            StopListenEndCheck();  // stackchan-cli: as in Idle
+             display->SetStatus(Lang::Strings::SPEAKING);
+ 
+             if (listening_profile_ == kListeningProfileRaw) {
+diff --git a/firmware/main/application.h b/firmware/main/application.h
+index 9fa48cd..b82b27b 100644
+--- a/firmware/main/application.h
++++ b/firmware/main/application.h
+@@ -18,6 +18,7 @@
+ #include "listening_profile.h"
+ #include "device_state.h"
+ #include "device_state_machine.h"
++#include "listen_end_detector.h"
+ 
+ // Main event bits
+ #define MAIN_EVENT_SCHEDULE             (1 << 0)
+@@ -33,6 +34,7 @@
+ #define MAIN_EVENT_START_LISTENING      (1 << 10)
+ #define MAIN_EVENT_STOP_LISTENING       (1 << 11)
+ #define MAIN_EVENT_STATE_CHANGED        (1 << 12)
++#define MAIN_EVENT_LISTEN_END_CHECK     (1 << 13)  // stackchan-cli: wake-word listening end
+ 
+ 
+ enum AecMode {
+@@ -141,6 +143,11 @@ private:
+     std::unique_ptr<Protocol> protocol_;
+     EventGroupHandle_t event_group_ = nullptr;
+     esp_timer_handle_t clock_timer_handle_ = nullptr;
++    // stackchan-cli: ends a wake-word listening session on the device, since
++    // the gateway does not. Checked every 100 ms while active.
++    esp_timer_handle_t listen_end_timer_ = nullptr;
++    stackchan::ListenEndDetector listen_end_;
++    bool wake_word_session_ = false;  // the current listening began with the wake word
+     DeviceStateMachine state_machine_;
+     ListeningMode listening_mode_ = kListeningModeAutoStop;
+     std::atomic<ListeningProfile> pending_listening_profile_{kListeningProfileVoice};
+@@ -169,6 +176,9 @@ private:
+     void HandleNetworkDisconnectedEvent();
+     void HandleActivationDoneEvent();
+     void HandleWakeWordDetectedEvent();
++    void StartListenEndCheck();
++    void StopListenEndCheck();
++    void HandleListenEndCheckEvent();
+     uint32_t BeginListeningRequest(ListeningProfile profile);
+     void InvalidatePendingListeningRequest();
+     bool IsListeningRequestCurrent(uint32_t generation) const;
+diff --git a/firmware/main/audio/audio_service.h b/firmware/main/audio/audio_service.h
+index 8f7181f..d699ba0 100644
+--- a/firmware/main/audio/audio_service.h
++++ b/firmware/main/audio/audio_service.h
+@@ -192,7 +192,9 @@ private:
+ 
+     bool wake_word_initialized_ = false;
+     bool audio_processor_initialized_ = false;
+-    bool voice_detected_ = false;
++    // stackchan-cli: atomic, as the main task reads it while listening
++    // (ListenEndDetector) and the AFE task writes it.
++    std::atomic<bool> voice_detected_{false};
+     bool service_stopped_ = true;
+     bool audio_input_need_warmup_ = false;
+ 
+diff --git a/firmware/main/listen_end_detector.h b/firmware/main/listen_end_detector.h
+new file mode 100644
+index 0000000..f12fcb7
+--- /dev/null
++++ b/firmware/main/listen_end_detector.h
+@@ -0,0 +1,103 @@
++#pragma once
++
++// stackchan-cli: decide when a wake-word listening session has ended, from
++// the AFE's voice activity. Upstream xiaozhi leaves this to the server, but
++// the stackchan-mcp gateway only waits for the device's listen.stop, so
++// without this a wake-word session runs until a screen tap or the board's
++// 30 s safety stop (PollTouchpad); kMaxMs here always ends it first.
++// Pure logic (no ESP-IDF), tested in host_test.
++
++#include <cstdint>
++
++namespace stackchan {
++
++enum class ListenEnd {
++    kNone,
++    kSilence,
++    kNoSpeech,
++    kMax,
++};
++
++inline const char* ListenEndName(ListenEnd end) {
++    switch (end) {
++        case ListenEnd::kSilence: return "silence after speech";
++        case ListenEnd::kNoSpeech: return "no speech";
++        case ListenEnd::kMax: return "max duration";
++        default: return "none";
++    }
++}
++
++class ListenEndDetector {
++public:
++    // Voice in the first moments is the device's own start sound (the
++    // listening popup is played as the microphone opens, and there is no
++    // AEC on this board), not the user. The VAD lags behind the audio, so
++    // its "speaking" can outlast this window: speech is counted only after
++    // the VAD has also reported silence once past it, or from kArmByMs on
++    // (voice that long is the user talking straight through the sound).
++    static constexpr int64_t kIgnoreFirstMs = 700;
++    static constexpr int64_t kArmByMs = 1500;
++    static constexpr int64_t kSilenceAfterSpeechMs = 1000;  // speech then this much silence
++    static constexpr int64_t kNoSpeechMs = 5000;            // no speech at all since the start
++    static constexpr int64_t kMaxMs = 10000;                // whole session
++
++    void Start(int64_t now_ms) {
++        active_ = true;
++        started_ms_ = now_ms;
++        armed_ = false;
++        heard_speech_ = false;
++        speaking_ = false;
++        silence_since_ms_ = now_ms;
++    }
++
++    void Stop() { active_ = false; }
++    bool active() const { return active_; }
++
++    // Update with the current voice activity. Returns the reason the session
++    // has ended, once (the detector stops itself), or kNone.
++    ListenEnd Update(int64_t now_ms, bool speaking) {
++        if (!active_) {
++            return ListenEnd::kNone;
++        }
++        if (!armed_) {
++            int64_t elapsed = now_ms - started_ms_;
++            if (elapsed >= kArmByMs) {
++                armed_ = true;  // still voice: the user, so count it
++            } else if (elapsed >= kIgnoreFirstMs && !speaking) {
++                armed_ = true;  // the start sound is over
++            } else {
++                speaking = false;
++            }
++        }
++        if (speaking) {
++            heard_speech_ = true;
++        } else if (speaking_) {
++            silence_since_ms_ = now_ms;
++        }
++        speaking_ = speaking;
++
++        ListenEnd end = ListenEnd::kNone;
++        if (now_ms - started_ms_ >= kMaxMs) {
++            end = ListenEnd::kMax;
++        } else if (!heard_speech_ && now_ms - started_ms_ >= kNoSpeechMs) {
++            end = ListenEnd::kNoSpeech;
++        } else if (heard_speech_ && !speaking_ &&
++                   now_ms - silence_since_ms_ >= kSilenceAfterSpeechMs) {
++            end = ListenEnd::kSilence;
++        }
++        if (end != ListenEnd::kNone) {
++            active_ = false;
++        }
++        return end;
++    }
++
++private:
++    bool active_ = false;
++    int64_t started_ms_ = 0;
++    bool armed_ = false;  // past the start sound
++    bool heard_speech_ = false;
++    bool speaking_ = false;
++    int64_t silence_since_ms_ = 0;
++};
++
++}  // namespace stackchan
