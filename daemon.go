@@ -35,7 +35,6 @@ func cmdDaemon(args []string) error {
 	set, verbose := fs("daemon")
 	opts := daemonOptions{}
 	set.BoolVar(&opts.touch, "touch", true, "react to head touch events")
-	set.IntVar(&opts.tapMaxMs, "tap-max", 1000, "touches up to this many ms are a tap; longer ones a stroke")
 	set.BoolVar(&opts.avatar, "avatar", true, "send ~/.stackchan/avatar/*.png to the device on every (re)connect")
 	set.BoolVar(&opts.voice, "voice", true, "run ~/.stackchan/voice-commands.txt on speech after a screen tap")
 	set.StringVar(&opts.reactions, "reactions", filepath.Join(stackchanDir(), "reactions"), "dir of per-gesture reaction scripts (<gesture>.txt)")
@@ -105,7 +104,6 @@ func openGatewayLog() (*os.File, error) {
 type daemonOptions struct {
 	verbose   bool
 	touch     bool
-	tapMaxMs  int
 	avatar    bool
 	voice     bool
 	reactions string
@@ -266,7 +264,7 @@ func gatewayStderr(verbose bool) (w io.Writer, closeLog func()) {
 // serveDaemon serves IPC on ln and, when voiceLn is set, voice commands on it.
 func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) error {
 	fmt.Fprintln(os.Stderr, "daemon: gateway up; waiting for device...")
-	fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch %v (tap ≤ %dms) · reactions %s · Ctrl-C to stop\n", ipcAddr, opts.touch, opts.tapMaxMs, reactionsDir)
+	fmt.Fprintf(os.Stderr, "daemon: IPC on %s · touch %v · reactions %s · Ctrl-C to stop\n", ipcAddr, opts.touch, reactionsDir)
 
 	stop := make(chan struct{})
 	var stopOnce sync.Once
@@ -323,7 +321,7 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 			ev.at = time.Now()
 			queueLatest(touches, ev)
 		})
-		go reactToTouches(c, touches, time.Duration(opts.tapMaxMs)*time.Millisecond, sl, daemonTimers, stop)
+		go reactToTouches(c, touches, sl, daemonTimers, stop)
 	}
 	if voiceLn != nil {
 		fmt.Fprintf(os.Stderr, "daemon: voice commands on (rules %s)\n", voiceCommandsPath())
@@ -457,7 +455,7 @@ func timestampStderr() (flush func()) {
 }
 
 // touchEvent is the params of the gateway's "stackchan/event" notification.
-// The firmware detects touches locally at 100 Hz and reports each finished
+// The firmware detects touches locally every 50 ms and reports each finished
 // gesture with its contact duration, so nothing is lost to slow Wi-Fi.
 type touchEvent struct {
 	EventType  string `json:"event_type"`
@@ -479,29 +477,32 @@ func queueLatest(q chan touchEvent, ev touchEvent) {
 	q <- ev
 }
 
-// reactToTouches classifies each touch by contact duration (the firmware's
-// own label calls anything ≥ 400 ms a stroke, which is too eager) and runs
-// the matching reaction. A touch made during a reaction is answered after it,
+// reactToTouches runs the reaction for each touch the firmware reports (tap
+// or stroke). A touch made during a reaction is answered after it,
 // unless it came within a second of the touch being answered (one palm
 // contact reported as two gestures) or has waited so long the moment passed.
 //
 // While the pomodoro waits for an answer (timers may be nil), a touch is the
 // answer instead. It is taken without waiting for stepMu, which a notice
 // (asking for that very answer) may hold for several seconds.
-func reactToTouches(c *mcp.Client, touches <-chan touchEvent, tapMax time.Duration, sl *sleeper, timers *timerSet, stop <-chan struct{}) {
-	judge := touchJudge{tapMax: tapMax}
+func reactToTouches(c *mcp.Client, touches <-chan touchEvent, sl *sleeper, timers *timerSet, stop <-chan struct{}) {
+	var judge touchJudge
 	for {
 		select {
 		case <-stop:
 			return
 		case ev := <-touches:
 			gesture, ignored := judge.judge(ev, time.Now())
-			if gesture == "" {
+			if ignored != "" {
 				fmt.Fprintf(os.Stderr, "daemon: touch ignored (%s): %s %dms\n", ignored, ev.Subtype, ev.DurationMs)
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms (firmware: %s)\n", gesture, ev.DurationMs, ev.Subtype)
+			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms\n", gesture, ev.DurationMs)
 			if timers != nil && answerByTouch(timers, ev.at) {
+				continue
+			}
+			if !reactsTo(gesture) {
+				fmt.Fprintf(os.Stderr, "daemon: touch ignored (no reaction for gesture %q)\n", ev.Subtype)
 				continue
 			}
 			// The sensor is normally off while asleep; this covers a touch
@@ -530,12 +531,15 @@ const (
 
 // touchJudge decides how reactToTouches answers each touch.
 type touchJudge struct {
-	tapMax       time.Duration
 	lastAnswered time.Time // arrival time of the last touch we reacted to
 }
 
-// judge returns the gesture to react with ("tap" or "stroke"), or "" and why
-// the touch is ignored. now is when the touch is taken off the queue.
+// judge returns the touch's gesture, or why the touch is ignored. now is when
+// the touch is taken off the queue. The gesture is the firmware's own label,
+// lower-cased: since firmware 1.18.0 it tells tap and stroke apart by finger
+// movement (a stroke slides across zones), which the contact duration cannot
+// (a quick stroke is under a second). Any other label is returned as it is:
+// it still answers a waiting pomodoro, though no reaction is run for it.
 func (j *touchJudge) judge(ev touchEvent, now time.Time) (gesture, ignored string) {
 	if ev.at.Sub(j.lastAnswered) < touchDuplicateWindow {
 		return "", "same contact as the previous one"
@@ -544,11 +548,11 @@ func (j *touchJudge) judge(ev touchEvent, now time.Time) (gesture, ignored strin
 		return "", fmt.Sprintf("waited %s during a reaction", waited.Round(time.Second))
 	}
 	j.lastAnswered = ev.at
-	if time.Duration(ev.DurationMs)*time.Millisecond <= j.tapMax {
-		return "tap", ""
-	}
-	return "stroke", ""
+	return strings.ToLower(ev.Subtype), ""
 }
+
+// reactsTo reports whether a gesture has a reaction script.
+func reactsTo(gesture string) bool { return gesture == "tap" || gesture == "stroke" }
 
 // watchSessions logs device (re)connections and has sl apply the state to
 // each one (avatar set, touch sensor, face, scripts): a loaded avatar set
@@ -624,7 +628,7 @@ all-leds --r 80 --g 180 --b 255
 say --face happy "わっ、なあに？"
 clear-leds
 `,
-	"stroke": `# Reaction for a stroke / long touch.
+	"stroke": `# Reaction for a stroke (a finger sliding across the head).
 all-leds --r 255 --g 120 --b 160
 say --face embarrassed "えへへ、なでられるの好き。"
 clear-leds

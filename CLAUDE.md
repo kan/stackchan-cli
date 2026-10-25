@@ -430,7 +430,7 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 
 ## 2026-10-17 更新log（firmware 1.17.0 / gateway 0.18.0・IP変更対応・VOICEVOX自動起動）
 
-> 本節が最新。上の「stage-3 daemon + タッチ反応log」のポーリング方式、出力配線（`execMu` での直列化）、運用注意（ポート解放待ち）、v1.8.0 前提の記述は本節で置き換え。
+> 版と tap / stroke の判定は「2026-10-25 更新log」が最新。上の「stage-3 daemon + タッチ反応log」のポーリング方式、出力配線（`execMu` での直列化）、運用注意（ポート解放待ち）、v1.8.0 前提の記述は本節で置き換え。
 
 ### daemon の常駐方式（repo 外・この PC の設定）
 - タスクスケジューラ `StackchanDaemon`（ログオン時）が
@@ -484,8 +484,8 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 新機能の使い方:
   - **タッチ通知**: `legacy_event.enabled: true` の notify.yml を `STACKCHAN_NOTIFY_CONFIG` で渡すと、
     gateway が `stackchan/event`（`event_type`/`subtype`/`duration_ms`）を stdio に通知する。
-    daemon はこれで反応（ポーリング廃止）。firmware の分類は 400ms 以上を stroke とするので、
-    daemon は `duration_ms` ≤ 1000ms を tap とし直す。
+    daemon はこれで反応（ポーリング廃止）。1.17.0 の分類は 400ms 以上を stroke とするので、
+    daemon は `duration_ms` ≤ 1000ms を tap とし直していた（1.18.0 で廃止。「2026-10-25 更新log」）。
   - **アバター**: build 時埋め込みは廃止され、`load_avatar_set`（layered = 14 枚 × 160×120 RGB565 LE、
     537,600 バイト）で実行時に送る。デバイスの RAM にのみ保持 → daemon が新 session ごとに再送。
     デバイスは gateway の `VISION_HOST:8766/avatar_set/<id>` を GET する。
@@ -603,8 +603,8 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   60 秒答えが無いか落ちたら止めて、次の音声で起動し直す。以前は毎回 Python を起動していた（読み込みに 1.5〜3 秒）。
 - GPU: RTX 2070 SUPER（8GB）。CUDA のライブラリは gateway の環境に
   `uv pip install --python %APPDATA%\uv\tools\stackchan-mcp\Scripts\python.exe nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"`
-  で追加した。**gateway を `uv tool install --force` で入れ直すと消える**ので、そのときは README の `--with` 付きの
-  コマンドを使う。CTranslate2 は DLL を PATH からしか探さないため、`whisperEnv`（`stt.go`）が
+  で追加した。**gateway を `uv tool install --force` で入れ直すと消える**ので、入れ直しは `scripts/install-gateway.ps1`
+  で行う（CUDA のライブラリもまとめて入れる）。CTranslate2 は DLL を PATH からしか探さないため、`whisperEnv`（`stt.go`）が
   `site-packages\nvidia\{cublas,cudnn,cuda_nvrtc}\bin` を PATH に足し、device=cuda / float16 にする（文字起こし係と
   gateway の `listen` の両方）。cuBLAS と cuDNN の両方が無ければ CPU のまま。文字起こし係は GPU に失敗したら CPU に
   切り替えるが、gateway の `listen` には切り替えが無い（gateway は改造しない）。GPU で困ったら
@@ -760,6 +760,35 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   応答だから）。いつもの反応は `stepMu` を取ったあと、10 秒以上待ったタッチを捨てる。
 - 既定の音声ルールに足した語で Whisper のプロンプトが 120 文字を超え、末尾の「何時、何日、日付」が落ちた。キーワードを
   「タイマー」「ポモドーロ」「何分」のような短い語にして収めた（ほかの語を含む組み合わせの語はプロンプトに入らない）。
+
+## 2026-10-25 更新log（firmware 1.18.0 / gateway 0.20.0・issue #12）
+
+- 取り込みの手順と毎回の確認項目は `docs/upstream-upgrade.md`。gateway の入れ直しは `scripts/install-gateway.ps1`
+  （`av<19` と CUDA のライブラリもまとめて入れ、版を確かめる）。
+- 取り込み方（ユーザー決定）: gateway は版を固定する。firmware は自分でビルドするまで（#11）ビルド済みのアプリ部分だけを
+  書き込み、NVS を残す。自分でビルドするようになったら、upstream との差分をパッチとしてこの repo に置き、upstream の
+  リリースのタグにあて直す（upstream に取り込まれた変更はパッチから外す）。確認は GitHub の Watch（Releases）で、月 1 回くらい。
+- issue を書いた 10/22 の後に gateway 0.20.0 が出た（外部電源での自動オフのツール 2 つのみ）。upstream の推奨の組み合わせの
+  0.20.0 / 1.18.0 にした（ユーザー決定）。
+- firmware 1.18.0 の assets とパーティション表は 1.17.0 と同じで、書き込んだのは `0x20000` の `xiaozhi.bin` だけ。
+- **書き込み直後は本体の通信が遅かった**: ping の平均 600〜740ms（ルーターへは 5ms）、アバターの送信（本体の HTTP の取得）が
+  93〜108 秒（以前は 3〜8 秒）。esptool で本体を再起動し直すと 3 秒に戻った。原因は不明。手順書に「書き込んだあと、もう一度
+  再起動する」を入れた。再起動後の ping は平均 250ms 前後（Wi-Fi の省電力 `min_modem` のまま）。
+- tap / stroke: 1.18.0 は指の動きで判定する（ゾーンをまたげば stroke、動かさない 100〜500ms の接触が tap。動かさずに置いた手は
+  通知しない）。daemon は firmware の `subtype` のまま反応する（`touchJudge`）。`--tap-max` は削除。
+  daemon が 1000ms 以下を tap とし直すと、速いなでる（1 秒未満）を tap と誤るため。
+- 1.18.0 の挙動の変化: 起動後 10 秒は通知が出ない。画面が消えている間は強く触れないとタップにならない。外部電源では、
+  何もしなくても画面が暗くならず電源も切れない（`external_power_auto_off` で戻せる）。このタイマーは gateway の接続中は
+  数えない（CHANGELOG）。
+- gateway 0.19.0 の複数台の接続: `device_id` を省けば最初に繋いだ本体が対象で、こちらの呼び出しは変えていない。
+  `listen` は `language` を省くと `STACKCHAN_LISTEN_LANGUAGE`（未設定なら `ja`）。CLI は `--lang` の既定 `ja` を渡す。
+- 実機で確認済み: 接続（デバイス側ツール 49 個、`get_touch_state` に `enabled` `masked` `boot_grace` が出る）、
+  アバターの送信、`say`、`listen`、音声コマンド（「今何時?」）、`sleep` / `wakeup`（センサーと寝顔の切り替え）、`timer`、
+  頭のタッチ。なでる 2 回目の試しでは 4 回の接触が stroke 300ms / tap 150ms / stroke 1450ms / stroke 200ms と届いた
+  （200〜300ms の stroke は、前の daemon の判定なら tap になる）。1 回目の試しでは、なでた 3 回が tap 150〜200ms になった
+  （指がゾーンをまたがなかったとみられる）。
+- 本体のシリアルログ（`touch raw: 0x00 -> 0x30`、`touch event: STROKE start_zones=... duration=300 ms`）で、本体の判定を
+  確かめられる。反応で本体が動くと COM3 が切れて読み取りが止まる。
 
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`

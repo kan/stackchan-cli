@@ -9,30 +9,37 @@ import (
 var t0 = time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 
 func touchAt(at time.Time, durationMs int) touchEvent {
-	return touchEvent{EventType: "touch", DurationMs: durationMs, at: at}
+	return touchEvent{EventType: "touch", Subtype: "tap", DurationMs: durationMs, at: at}
 }
 
-func TestTouchJudgeClassifiesByDuration(t *testing.T) {
+func TestTouchJudgeTakesFirmwareGesture(t *testing.T) {
 	tests := []struct {
+		subtype    string
 		durationMs int
 		want       string
+		reacts     bool
 	}{
-		{0, "tap"},
-		{400, "tap"}, // the firmware already calls this a stroke
-		{1000, "tap"},
-		{1001, "stroke"},
-		{5000, "stroke"},
+		{"tap", 300, "tap", true},
+		{"stroke", 600, "stroke", true}, // a quick stroke is under a second
+		{"stroke", 3000, "stroke", true},
+		{"STROKE", 300, "stroke", true},
+		{"", 300, "", false},       // still answers a pomodoro, no reaction
+		{"hold", 300, "hold", false},
 	}
 	for _, tt := range tests {
-		j := touchJudge{tapMax: time.Second}
-		if got, ignored := j.judge(touchAt(t0, tt.durationMs), t0); got != tt.want {
-			t.Errorf("%dms: gesture = %q (ignored %q), want %q", tt.durationMs, got, ignored, tt.want)
+		var j touchJudge
+		ev := touchAt(t0, tt.durationMs)
+		ev.Subtype = tt.subtype
+		got, ignored := j.judge(ev, t0)
+		if got != tt.want || ignored != "" || reactsTo(got) != tt.reacts {
+			t.Errorf("%q %dms: gesture = %q (ignored %q, reacts %v), want %q (reacts %v)",
+				tt.subtype, tt.durationMs, got, ignored, reactsTo(got), tt.want, tt.reacts)
 		}
 	}
 }
 
 func TestTouchJudgeIgnoresSameContact(t *testing.T) {
-	j := touchJudge{tapMax: time.Second}
+	var j touchJudge
 	steps := []struct {
 		after  time.Duration // arrival, from t0
 		answer bool
@@ -54,7 +61,7 @@ func TestTouchJudgeIgnoresSameContact(t *testing.T) {
 }
 
 func TestTouchJudgeIgnoresStaleTouch(t *testing.T) {
-	j := touchJudge{tapMax: time.Second}
+	var j touchJudge
 	if gesture, _ := j.judge(touchAt(t0, 300), t0.Add(touchMaxWait)); gesture == "" {
 		t.Errorf("a touch that waited exactly %s was ignored, want answered", touchMaxWait)
 	}

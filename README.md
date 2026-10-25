@@ -21,17 +21,14 @@ stackchan-cli (Go)  --stdio MCP-->  stackchan-mcp gateway (Python)  --WebSocket-
 ## 前提
 
 - **Go** 1.27+
-- **stackchan-mcp gateway 0.18.0**（firmware 1.17.0 と組で使う）。発話（`[tts]`）と聞き取り
-  （`[stt-faster-whisper]`）の追加モジュール込みで入れる。`av<19` は必須（PyAV 19 は
-  faster-whisper 1.2.1 が渡す `metadata_errors` 引数を受け付けず、文字起こしが失敗する）:
+- **stackchan-mcp gateway 0.20.0**（firmware 1.18.0 と組で使う）。`scripts/install-gateway.ps1` で入れる:
   ```
-  uv tool install --force --python 3.12 "stackchan-mcp[tts,stt-faster-whisper]==0.18.0" --with "av<19"
+  pwsh scripts/install-gateway.ps1          # -Cpu で CUDA のライブラリを省く
   ```
-  NVIDIA の GPU で文字起こしを速くするなら、CUDA のライブラリも同じ環境に入れる（約 1GB）。
-  入っていれば CLI が自動で GPU を使う（`STACKCHAN_FASTER_WHISPER_DEVICE=cpu` で CPU に戻せる）。
-  ```
-  uv tool install --force --python 3.12 "stackchan-mcp[tts,stt-faster-whisper]==0.18.0" --with "av<19" --with nvidia-cublas-cu12 --with "nvidia-cudnn-cu12==9.*"
-  ```
+  発話（`[tts]`）と聞き取り（`[stt-faster-whisper]`）の追加モジュール、`av<19`（PyAV 19 は
+  faster-whisper 1.2.1 が渡す `metadata_errors` 引数を受け付けず、文字起こしが失敗する）、NVIDIA の GPU が
+  あれば CUDA のライブラリ（約 1GB）をまとめて入れる。CUDA のライブラリがあれば CLI が自動で GPU を使う
+  （`STACKCHAN_FASTER_WHISPER_DEVICE=cpu` で CPU に戻せる）。版を上げる手順は `docs/upstream-upgrade.md`。
 - **StackChan** に stackchan-mcp ファームを書込み、WebSocket Gateway URL を本機へ向けてあること
   （captive portal の **Advanced** タブで `ws://<PC-LAN-IP>:8765/`。詳細は `CLAUDE.md`）。
 
@@ -116,8 +113,9 @@ stackchan-cli say "やっほー"
 
 - **タッチ反応**：本体（firmware 1.9 以降）が頭部タッチを自分で検出し、gateway が
   `stackchan/event` 通知として daemon に届ける（daemon が `~/.stackchan/notify.yml` を作り、
-  `STACKCHAN_NOTIFY_CONFIG` で gateway に渡す）。daemon は接触時間で tap/stroke を分類して反応
-  （〜1秒=tap / それ以上=stroke、`--tap-max <ms>` で変更、`--touch=false` で無効）。
+  `STACKCHAN_NOTIFY_CONFIG` で gateway に渡す）。daemon は本体の分類（firmware 1.18.0 以降は指の動きで
+  決まる。動かさずに短く（0.1〜0.5 秒）触れれば tap、指がゾーンをまたいで動けば stroke。動かさずに置いたままの手は
+  通知されない）のとおりに反応する（`--touch=false` で無効）。
   本体への問い合わせ（ポーリング）はしないので、通信が遅くても取りこぼさない。
 - **自作アバターの自動送信**：本体が接続するたび（再起動後も）、`~/.stackchan/avatar/*.png`（14 枚）を
   RGB565 に変換して `load_avatar_set` で送る。送った顔は本体の RAM にしか残らないため。
@@ -375,8 +373,9 @@ stackchan-cli source examples/greet.txt
   - 繋がらなくなった後は、USB 接続して
     `py scripts/nvs_set_ws_url.py --port COM3 --url ws://<PC-IP>:8765/`。NVS の `websocket.url` だけを
     書き換えるので Wi-Fi 設定は残る（captive portal に入る必要がない）。元の URL より長い URL は不可。
-- 想定バージョン：firmware **1.17.0** / gateway **0.18.0**（タッチ通知・`load_avatar_set`・
-  `gateway_config_set` はこの組み合わせが前提）。
+- 想定バージョン：firmware **1.18.0** / gateway **0.20.0**（タッチ通知・`load_avatar_set`・
+  `gateway_config_set` は firmware 1.17.0 / gateway 0.18.0 以降が前提。tap / stroke を本体の判定のまま使うのは
+  firmware 1.18.0 が前提）。
 
 ## ドキュメント
 
