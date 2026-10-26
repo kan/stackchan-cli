@@ -651,9 +651,16 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
   wake word もこの設定に従う。「2026-10-26 更新log」）と
   `reactions/sleep.txt`（LED 消灯、`brightness 0`）。起きるとセンサーを戻して `wake.txt`
   （`brightness 100`、`avatar embarrassed`）。
-- `stackchan-cli sleep`（引数なし）で時刻に関係なく眠り、`wakeup` まで起きない（ユーザー要望）。
+- `stackchan-cli sleep`（引数なし）で時刻に関係なく眠り、`wakeup` か次の時間帯の終わり（`sleepState.manualUntil`、
+  `sleepWindow.nextEnd`）に起きる（2026-10-26 にユーザー要望で変更。以前は `wakeup` まで起きず、深夜の `sleep` のあと
+  朝になっても寝たままだった）。朝 8 時の `sleep` は翌朝 7 時まで。`--sleep off` なら `wakeup` まで。
   時間帯の中で `wakeup` すると、その時間帯が終わるまで起きている。状態は daemon のメモリのみ。
   `sleep <ms>` は従来どおり一時停止（メタコマンドから `dispatch` の `cmdSleep` へ移動）。
+- 挨拶（issue #13）: 状態が変わったときだけ `reactions/goodnight.txt`（`sleep.txt` の前）/ `goodmorning.txt`
+  （`wake.txt` が済んだ後。失敗のやり直し中は待つ）を 1 回実行する（`sleeper.greet`、`sleepSteps.greetAt`）。
+  再接続と daemon の起動時は挨拶しない。再試行せず、本体が離れていて 5 分（`greetLate`）以上遅れたら捨てる
+  （昼に「おやすみ」と言わないように）。daemon の確認の間隔が 5 分以上空いた（PC のスリープ明け）ときの変化も挨拶しない。
+  06:58 の `sleep` も 07:00 に起きる（定刻で起きる仕様どおり。翌朝まで延ばさない）。
 - 再接続時: 眠っていれば sleep.txt を再実行。起きていればセンサー有効化と `set_avatar restFace` のみで、
   wake.txt は daemon 起動後の最初の接続だけ（手動で変えた明るさを Wi-Fi の切断のたびに戻さないため）。
   失敗（本体のタイムアウト）は 30 秒ごとにやり直す。センサーは成功するまで、スクリプトは最大 5 回。

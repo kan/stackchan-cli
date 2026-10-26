@@ -131,9 +131,14 @@ stackchan-cli say "やっほー"
     変わる）。`uv run --with pillow python scripts/gen_avatars.py --sleep` で作る。無ければ通常のアバターのまま眠る。
     本体がつながるたびにも、状態に合う方を送る（`--avatar=false` なら送らない）。
     手動では `stackchan-cli avatar-load --set sleep`（通常に戻すのは `avatar-load`）。
-  - `stackchan-cli sleep` で時刻に関係なく眠り、`stackchan-cli wakeup` まで起きない（朝 7 時を過ぎても）。
+  - `stackchan-cli sleep` で時刻に関係なく眠り、`stackchan-cli wakeup` か、次に眠る時間帯が終わる時刻
+    （既定では朝 7 時）に起きる。朝 8 時に `sleep` すると翌朝 7 時まで眠る。`--sleep off` なら `wakeup` まで眠る。
     眠る時間帯に `wakeup` すると、その時間帯が終わるまで起きている。どちらも daemon が必要で、
     状態は daemon を再起動すると消える。数字付きの `sleep <ms>` は従来どおりスクリプト内の一時停止。
+  - 眠るときと起きるとき（時刻でも、コマンドでも）は挨拶する。眠るときは `sleep.txt` の前に
+    `reactions/goodnight.txt`（既定: 「おやすみ」）、起きるときは `wake.txt` の後に `goodmorning.txt`
+    （既定: 「おはよう」）を 1 回だけ実行する。本体が繋ぎ直したときと daemon の起動時は挨拶しない。
+    失敗してもやり直さず、本体が離れていて 5 分以上遅れた挨拶は捨てる（PC のスリープ明けに気付いた変化も挨拶しない）。
   - 本体がつながり直したとき、眠っていれば `sleep.txt` を実行し直す。起きていればセンサーを有効に
     するだけで、`wake.txt` は daemon の起動後に初めてつながったときだけ実行する（手で変えた明るさを
     再接続のたびに戻さないため）。

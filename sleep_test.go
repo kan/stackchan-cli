@@ -58,6 +58,26 @@ func TestSleepWindowContains(t *testing.T) {
 	}
 }
 
+func TestSleepWindowNextEnd(t *testing.T) {
+	at := func(d, h, m int) time.Time { return time.Date(2026, 10, d, h, m, 0, 0, time.Local) }
+	win, _ := parseSleepWindow("23:00-07:00")
+	tests := []struct{ now, want time.Time }{
+		{at(20, 22, 0), at(21, 7, 0)},
+		{at(20, 2, 0), at(20, 7, 0)},
+		{at(20, 7, 0), at(21, 7, 0)}, // exactly at the end: the next one
+		{at(31, 23, 30), time.Date(2026, 11, 1, 7, 0, 0, 0, time.Local)},
+	}
+	for _, tt := range tests {
+		if got := win.nextEnd(tt.now); !got.Equal(tt.want) {
+			t.Errorf("nextEnd(%v) = %v, want %v", tt.now, got, tt.want)
+		}
+	}
+	var none *sleepWindow
+	if !none.nextEnd(at(20, 3, 0)).IsZero() {
+		t.Error("a nil window has an end")
+	}
+}
+
 func TestSleepStateCommands(t *testing.T) {
 	at := func(h, m int) time.Time { return time.Date(2026, 10, 20, h, m, 0, 0, time.Local) }
 	win, _ := parseSleepWindow("00:00-07:00")
@@ -67,18 +87,51 @@ func TestSleepStateCommands(t *testing.T) {
 		t.Fatal("window alone: want awake at 12:00 and asleep at 01:00")
 	}
 
-	// sleep holds past the window's end until wakeup.
-	st.sleep()
-	for _, h := range []int{12, 3, 8} {
-		if !st.want(at(h, 0)) {
-			t.Errorf("after sleep: awake at %02d:00", h)
+	// sleep in the evening holds through the night and ends at the window's end.
+	day2 := func(h, m int) time.Time { return at(h, m).AddDate(0, 0, 1) }
+	if until := st.sleep(at(22, 0)); !until.Equal(day2(7, 0)) {
+		t.Errorf("sleep at 22:00: until %v, want the next 07:00", until)
+	}
+	for _, tm := range []time.Time{at(23, 0), day2(3, 0), day2(6, 59)} {
+		if !st.want(tm) {
+			t.Errorf("after sleep at 22:00: awake at %v", tm)
 		}
 	}
+	if st.want(day2(7, 0)) {
+		t.Error("after sleep at 22:00: still asleep at the next 07:00")
+	}
+	if st.want(day2(12, 0)) || !st.want(day2(1, 0).AddDate(0, 0, 1)) {
+		t.Error("after waking at 07:00: want awake by day and asleep the next night")
+	}
+
+	// sleep inside the window (after a wakeup there) ends at that window's end.
+	st = sleepState{win: win}
+	st.wakeup(at(1, 0))
+	st.sleep(at(1, 9))
+	if !st.want(at(1, 10)) || !st.want(at(6, 59)) || st.want(at(7, 0)) {
+		t.Error("sleep at 01:09: want asleep until 07:00, then awake")
+	}
+
+	// sleep in the morning holds all day until the next morning.
+	st = sleepState{win: win}
+	st.sleep(at(8, 0))
+	for _, tm := range []time.Time{at(12, 0), at(23, 0), day2(6, 59)} {
+		if !st.want(tm) {
+			t.Errorf("after sleep at 08:00: awake at %v", tm)
+		}
+	}
+	if st.want(day2(7, 0)) {
+		t.Error("after sleep at 08:00: still asleep at the next 07:00")
+	}
+
+	// ... unless woken: wakeup the same morning, then the next night sleeps.
+	st = sleepState{win: win}
+	st.sleep(at(8, 0))
 	st.wakeup(at(9, 0))
-	if st.want(at(9, 0)) {
+	if st.want(at(9, 0)) || st.want(at(23, 0)) {
 		t.Error("after wakeup at 09:00: still asleep")
 	}
-	if !st.want(at(1, 0)) {
+	if !st.want(day2(1, 0)) {
 		t.Error("after a daytime wakeup: the next night does not sleep")
 	}
 
@@ -100,8 +153,10 @@ func TestSleepStateCommands(t *testing.T) {
 	if st.want(at(3, 0)) {
 		t.Error("no window: asleep at 03:00")
 	}
-	st.sleep()
-	if !st.want(at(15, 0)) {
+	if until := st.sleep(at(15, 0)); !until.IsZero() {
+		t.Errorf("no window: sleep until %v, want only wakeup", until)
+	}
+	if !st.want(at(15, 0)) || !st.want(at(15, 0).AddDate(0, 0, 3)) {
 		t.Error("no window, after sleep: awake")
 	}
 	st.wakeup(at(15, 0))

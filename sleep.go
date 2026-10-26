@@ -4,7 +4,8 @@ package main
 // both the firmware's own touch motion and the touch events) and runs
 // reactions/sleep.txt (screen dark by default). On waking it turns the sensor
 // back on and runs reactions/wake.txt. StackChan sleeps during a daily window
-// (daemon --sleep), and on demand: `sleep` until `wakeup`.
+// (daemon --sleep), and on demand: `sleep` until `wakeup` or the window's next
+// end. Each change of state greets (reactions/goodnight.txt, goodmorning.txt).
 
 import (
 	"encoding/json"
@@ -96,12 +97,26 @@ func (w *sleepWindow) String() string {
 	return fmt.Sprintf("%02d:%02d-%02d:%02d", w.start/60, w.start%60, w.end/60, w.end%60)
 }
 
+// nextEnd returns the first end of the window after t, or the zero time for
+// no window.
+func (w *sleepWindow) nextEnd(t time.Time) time.Time {
+	if w == nil {
+		return time.Time{}
+	}
+	end := time.Date(t.Year(), t.Month(), t.Day(), w.end/60, w.end%60, 0, 0, t.Location())
+	if !end.After(t) {
+		end = end.AddDate(0, 0, 1)
+	}
+	return end
+}
+
 // sleepState decides whether StackChan should be asleep, from the window and
 // the sleep / wakeup commands.
 type sleepState struct {
 	win          *sleepWindow
-	manual       bool // `sleep`: asleep until `wakeup`, whatever the time
-	wokeInWindow bool // `wakeup` inside the window: awake until the window ends
+	manual       bool      // `sleep`: asleep until `wakeup` or manualUntil
+	manualUntil  time.Time // the window's next end after `sleep` (zero: no window, until `wakeup`)
+	wokeInWindow bool      // `wakeup` inside the window: awake until the window ends
 }
 
 func (st *sleepState) want(now time.Time) bool {
@@ -109,13 +124,21 @@ func (st *sleepState) want(now time.Time) bool {
 	if !in {
 		st.wokeInWindow = false
 	}
+	if st.manual && !st.manualUntil.IsZero() && !now.Before(st.manualUntil) {
+		st.manual = false
+	}
 	return st.manual || (in && !st.wokeInWindow)
 }
 
-func (st *sleepState) sleep() { st.manual = true }
+// sleep returns when StackChan wakes by itself (zero: only on `wakeup`).
+func (st *sleepState) sleep(now time.Time) time.Time {
+	st.manual = true
+	st.manualUntil = st.win.nextEnd(now)
+	return st.manualUntil
+}
 
 func (st *sleepState) wakeup(now time.Time) {
-	st.manual = false
+	st.manual, st.manualUntil = false, time.Time{}
 	st.wokeInWindow = st.win.contains(now)
 }
 
@@ -161,12 +184,14 @@ func signal1(ch chan struct{}) {
 // deviceConnected asks run to apply the current state to a new session.
 func (s *sleeper) deviceConnected() { signal1(s.reconnect) }
 
-// sleepNow and wakeNow are the sleep / wakeup commands.
-func (s *sleeper) sleepNow() {
+// sleepNow and wakeNow are the sleep / wakeup commands. sleepNow returns when
+// StackChan wakes by itself (zero: only on wakeup).
+func (s *sleeper) sleepNow() time.Time {
 	s.mu.Lock()
-	s.st.sleep()
+	until := s.st.sleep(time.Now())
 	s.mu.Unlock()
 	signal1(s.poke)
+	return until
 }
 
 func (s *sleeper) wakeNow() {
@@ -191,14 +216,23 @@ type sleepSteps struct {
 	script   bool // run sleep.txt / wake.txt (retried up to sleepScriptAttempts)
 	face     bool // awake reconnect without wake.txt: just restore restFace
 	attempts int  // script attempts so far
+	// greetAt is when the state changed: say goodnight.txt / goodmorning.txt
+	// once (zero: no greeting). Not retried, and dropped when the device
+	// comes back later than greetLate.
+	greetAt time.Time
 }
+
+const greetLate = 5 * time.Minute
 
 // run checks the state every 30 s and on sleep / wakeup. On a change it sets
 // the touch sensor and runs sleep.txt or wake.txt. The device often times
 // out, so a failed step is tried again every 30 s while the device is
 // connected; nothing is tried while it is away, as a reconnect applies the
-// state anyway. On a reconnect while awake only the sensor and the face are
-// set, so a brightness changed by hand survives Wi-Fi drops; the first
+// state anyway. Only a change of state greets (goodnight.txt /
+// goodmorning.txt); a reconnect, the daemon starting, or a change noticed
+// after a long gap between checks (the PC was suspended) does not. On a
+// reconnect while awake only the sensor and the face are set, so a
+// brightness changed by hand survives Wi-Fi drops; the first
 // connection after the daemon starts runs wake.txt too (the daemon may have
 // stopped while asleep). Every new session and every change of state also
 // gets the avatar set for the state (the set lives in device RAM).
@@ -211,17 +245,24 @@ func (s *sleeper) run(stop <-chan struct{}) {
 		todo = sleepSteps{sensor: true, script: true}
 	}
 	firstConnect := true
+	lastCheck := time.Now()
 	for {
 		want := s.want()
+		now := time.Now()
 		if want != s.asleep.Load() {
 			s.asleep.Store(want)
-			todo = sleepSteps{avatar: true, sensor: true, script: true}
+			todo = sleepSteps{avatar: true, sensor: true, script: true, greetAt: now}
 			if want {
 				fmt.Fprintln(os.Stderr, "daemon: going to sleep")
 			} else {
 				fmt.Fprintln(os.Stderr, "daemon: waking up")
 			}
+			if gap := now.Sub(lastCheck); gap > greetLate {
+				todo.greetAt = time.Time{}
+				fmt.Fprintf(os.Stderr, "daemon: no greeting (the last check was %s ago)\n", gap.Round(time.Second))
+			}
 		}
+		lastCheck = now
 		if (todo.avatar || todo.sensor || todo.script || todo.face) && deviceIsConnected(s.c) {
 			if todo.avatar {
 				todo.avatar = false
@@ -276,6 +317,11 @@ func (s *sleeper) apply(todo *sleepSteps, asleep bool) {
 	if todo.sensor {
 		todo.sensor = !s.setTouchSensor(!asleep)
 	}
+	// Goodnight before sleep.txt darkens the screen, good morning once
+	// wake.txt has brightened it (or given up retrying).
+	if asleep {
+		s.greet(todo, true)
+	}
 	if todo.script {
 		name := "wake"
 		if asleep {
@@ -298,8 +344,31 @@ func (s *sleeper) apply(todo *sleepSteps, asleep bool) {
 			fmt.Fprintf(os.Stderr, "daemon: set_avatar %s: %v\n", restFace, err)
 		}
 	}
+	if !asleep && !todo.script {
+		s.greet(todo, false)
+	}
 	if todo.sensor {
 		fmt.Fprintln(os.Stderr, "daemon: touch sensor not set yet; retrying in 30s")
+	}
+}
+
+// greet runs goodnight.txt or goodmorning.txt once for a change of state.
+func (s *sleeper) greet(todo *sleepSteps, asleep bool) {
+	if todo.greetAt.IsZero() {
+		return
+	}
+	at := todo.greetAt
+	todo.greetAt = time.Time{}
+	name := "goodmorning"
+	if asleep {
+		name = "goodnight"
+	}
+	if late := time.Since(at); late > greetLate {
+		fmt.Fprintf(os.Stderr, "daemon: %s.txt: skipped (the device came back %s late)\n", name, late.Round(time.Second))
+		return
+	}
+	if failed := runNamedScript(s.c, name, defaultSleepScripts, true, nil); failed > 0 {
+		fmt.Fprintf(os.Stderr, "daemon: %s.txt: %d line(s) failed (not retried)\n", name, failed)
 	}
 }
 
@@ -342,7 +411,7 @@ func (s *sleeper) setTouchSensor(enabled bool) bool {
 	return true
 }
 
-// defaultSleepScripts seed reactions/sleep.txt and wake.txt.
+// defaultSleepScripts seed reactions/sleep.txt, wake.txt and the greetings.
 var defaultSleepScripts = map[string]string{
 	"sleep": `# 眠るとき（daemon --sleep の時刻になったとき、sleep コマンド）と、
 # 眠っている間に本体が繋ぎ直したときに実行する。
@@ -357,10 +426,19 @@ brightness 10
 brightness 100
 avatar ` + restFace + `
 `,
+	"goodnight": `# 眠るときの挨拶。daemon --sleep の時刻になったときと sleep コマンドで、1 回だけ実行する
+# （本体が繋ぎ直したときは実行しない）。sleep.txt の前に実行する。
+say "おやすみ"
+`,
+	"goodmorning": `# 起きるときの挨拶。--sleep の時刻が終わったときと wakeup コマンドで、1 回だけ実行する
+# （daemon の起動時や本体が繋ぎ直したときは実行しない）。wake.txt の後に実行する。
+say "おはよう"
+`,
 }
 
 // cmdSleep is `sleep <ms>` (pause, for scripts) or, without an argument,
-// puts StackChan to sleep until `wakeup` (needs the daemon).
+// puts StackChan to sleep until `wakeup` or the end of the sleep window
+// (needs the daemon).
 func cmdSleep(args []string, e cmdEnv) error {
 	if len(args) > 0 {
 		return doSleep(args)
@@ -368,8 +446,11 @@ func cmdSleep(args []string, e cmdEnv) error {
 	if daemonSleeper == nil {
 		return fmt.Errorf("sleep (without ms) needs a running daemon")
 	}
-	daemonSleeper.sleepNow()
-	fmt.Fprintln(e.out, "going to sleep (until wakeup)")
+	if until := daemonSleeper.sleepNow(); until.IsZero() {
+		fmt.Fprintln(e.out, "going to sleep (until wakeup)")
+	} else {
+		fmt.Fprintf(e.out, "going to sleep (until wakeup or %s)\n", until.Format("01-02 15:04"))
+	}
 	return nil
 }
 

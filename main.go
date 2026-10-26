@@ -203,9 +203,12 @@ Commands:
   pomodoro               show what it is doing
   photo [--question "..."] [--open]   capture a photo; saved to ~/.stackchan/captures
   call <tool> [--json '{...}']   Invoke any tool with raw JSON arguments
-  sleep                  sleep until wakeup, whatever the time: touch sensor off,
-                         run ~/.stackchan/reactions/sleep.txt (needs the daemon)
-  wakeup                 wake up: touch sensor on, run reactions/wake.txt (needs the daemon)
+  sleep                  sleep until wakeup or the end of the daemon's --sleep window
+                         (07:00 by default; with --sleep off, until wakeup): touch
+                         sensor off, say goodnight.txt, run ~/.stackchan/reactions/sleep.txt
+                         (needs the daemon)
+  wakeup                 wake up: touch sensor on, run reactions/wake.txt, say goodmorning.txt
+                         (needs the daemon)
   sleep <ms>             pause (for scripts)
 
 Environment:
@@ -1182,7 +1185,7 @@ func replHelp(w io.Writer) {
   voice [text]                   run the voice command rules on text (no text: list them)
   photo [--question "..."] [--open]   capture; --open shows the saved image
   call <tool> --json '{...}'     raw tool call
-  sleep | wakeup                 sleep until wakeup (needs the daemon)
+  sleep | wakeup                 sleep until wakeup or the end of the --sleep window (needs the daemon)
   sleep <ms>                     pause (for choreography)
   repeat <n> <command...>        run a command n times
   source <file>                  run commands from a file (# lines are comments)
