@@ -300,6 +300,7 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 
 	// IPC is served right away; the device connection is only watched, so
 	// commands (e.g. status) never hang while the device is away.
+	daemonSpeech = &speech{} // before anything can say (wake.txt, notices, commands)
 	sl := newSleeper(opts.sleep, c, opts.avatar)
 	daemonSleeper = sl // before any command can run
 	fmt.Fprintf(os.Stderr, "daemon: sleeps %s and on the sleep command (touch sensor off, reactions sleep.txt / wake.txt)\n", opts.sleep)
@@ -482,8 +483,9 @@ func queueLatest(q chan touchEvent, ev touchEvent) {
 // unless it came within a second of the touch being answered (one palm
 // contact reported as two gestures) or has waited so long the moment passed.
 //
-// While the pomodoro waits for an answer (timers may be nil), a touch is the
-// answer instead. It is taken without waiting for stepMu, which a notice
+// While something is being said, a touch stops it instead. While the
+// pomodoro waits for an answer (timers may be nil), a touch is the answer
+// (and stops the notice being said). It is taken without waiting for stepMu, which a notice
 // (asking for that very answer) may hold for several seconds.
 func reactToTouches(c *mcp.Client, touches <-chan touchEvent, sl *sleeper, timers *timerSet, stop <-chan struct{}) {
 	var judge touchJudge
@@ -498,7 +500,16 @@ func reactToTouches(c *mcp.Client, touches <-chan touchEvent, sl *sleeper, timer
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "daemon: touch %s %dms\n", gesture, ev.DurationMs)
-			if timers != nil && answerByTouch(timers, ev.at) {
+			// A touch while speaking stops the speech instead of reacting; an
+			// answering touch stops it too (the notice asks for that answer).
+			// The loop waits during a reaction, so the speech is someone
+			// else's (an ask answer, a notice), not the reaction's own.
+			answered := timers != nil && answerByTouch(timers, ev.at)
+			stopped := stopSpeaking(ev.at)
+			if stopped {
+				fmt.Fprintln(os.Stderr, "daemon: speech stopped by touch")
+			}
+			if answered || stopped {
 				continue
 			}
 			if !reactsTo(gesture) {

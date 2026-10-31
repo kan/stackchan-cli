@@ -127,6 +127,8 @@ func dispatch(cmd string, args []string, e cmdEnv) error {
 		return cmdBrightness(args, e)
 	case "say":
 		return cmdSay(args, e)
+	case "stop":
+		return cmdStop(args, e)
 	case "listen":
 		return cmdListen(args, e)
 	case "voice":
@@ -182,6 +184,8 @@ Commands:
   say [--speaker N] [--face F] [--while-face F] <text>
                          speak via VOICEVOX (engine auto-started if needed);
                          --face after speaking, --while-face while speaking
+  stop                   stop what is being said, at the end of the sentence
+                         (a head touch while speaking does the same; needs the daemon)
   listen [--sec N] [--lang ja] [--model M] [--motion none|face-only|look-up]
                          record from the device mic and print the transcription
                          (needs the gateway's stt-faster-whisper extra)
@@ -405,6 +409,12 @@ func callTool(c *mcp.Client, tool string, args map[string]any, w io.Writer) (mcp
 		audioMu.Lock()
 		defer audioMu.Unlock()
 	}
+	return callToolHeld(c, tool, args, w)
+}
+
+// callToolHeld is callTool for a caller that holds audioMu itself (say,
+// which keeps it across its sentences).
+func callToolHeld(c *mcp.Client, tool string, args map[string]any, w io.Writer) (mcp.ToolResult, error) {
 	res, err := c.CallToolTimeout(tool, args, longToolTimeouts[tool])
 	if err != nil {
 		return res, err
@@ -715,14 +725,29 @@ func cmdSay(args []string, e cmdEnv) error {
 		}
 		setFace(c, during, e.errOut)
 		// Filled in now, not before a one-shot gateway waited for the device.
-		sayArgs["text"] = expandSayVars(w.text, time.Now())
-		res, err := callTool(c, "say", sayArgs, e.out)
-		if err == nil && e.deviceErrors {
-			if msg := resultError(res.Text()); msg != "" {
-				err = fmt.Errorf("say: %s", msg)
-			}
+		full := expandSayVars(w.text, time.Now())
+		sp := daemonSpeech
+		sentences := splitSentences(full)
+		if sp == nil || len(sentences) == 0 {
+			sentences = []string{full} // nothing can stop it: one call
 		}
-		if err != nil {
+		say := func(text string) error {
+			sayArgs["text"] = text
+			res, err := callToolHeld(c, "say", sayArgs, e.out)
+			if err != nil {
+				return err
+			}
+			// The gateway reports a device timeout as a result. The rest
+			// would time out too, holding audioMu for each sentence.
+			if msg := resultError(res.Text()); msg != "" {
+				if e.deviceErrors {
+					return fmt.Errorf("say: %s", msg)
+				}
+				return errSayRest
+			}
+			return nil
+		}
+		if err := speakSentences(sp, sentences, say, e.out); err != nil {
 			if during != "" {
 				setFace(c, *face, e.errOut) // do not leave the face for speaking on
 			}
@@ -733,6 +758,37 @@ func cmdSay(args []string, e cmdEnv) error {
 		setFace(c, *face, e.errOut)
 		return nil
 	})
+}
+
+// errSayRest from a sentence's say skips the rest without failing the say
+// (the result, printed already, carries the error).
+var errSayRest = errors.New("skip the rest of the say")
+
+// speakSentences says each sentence with its own say call. audioMu is held
+// across them, so no other say or listen slips in between sentences. With
+// sp (the daemon), the say counts as speaking from here on, and a stop
+// ends it before the next sentence.
+func speakSentences(sp *speech, sentences []string, say func(text string) error, out io.Writer) error {
+	audioMu.Lock()
+	defer audioMu.Unlock()
+	var h speaking
+	if sp != nil {
+		h = sp.begin()
+		defer sp.end(h)
+	}
+	for i, s := range sentences {
+		if sp != nil && sp.stopped(h) {
+			fmt.Fprintf(out, "say: stopped (%d of %d sentences said)\n", i, len(sentences))
+			return nil
+		}
+		if err := say(s); err != nil {
+			if errors.Is(err, errSayRest) {
+				return nil
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 // setFace sets the avatar face, warning to w when it fails. "" does nothing.
@@ -1152,6 +1208,7 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("call", pcItems(toolNames...)...),
 		readline.PcItem("sleep"),
 		readline.PcItem("wakeup"),
+		readline.PcItem("stop"),
 		readline.PcItem("repeat"),
 		readline.PcItem("source"),
 		readline.PcItem("help"),
