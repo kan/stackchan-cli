@@ -71,6 +71,17 @@ func (s *speech) stop(at time.Time) bool {
 	return false
 }
 
+// stops counts the stops so far (0 without the daemon). One say speaks at a
+// time, so a change across a say means that say was stopped.
+func (s *speech) stops() uint64 {
+	if s == nil {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epoch
+}
+
 // stopSpeaking stops the daemon's speech begun before at, if any.
 func stopSpeaking(at time.Time) bool { return daemonSpeech != nil && daemonSpeech.stop(at) }
 

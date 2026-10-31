@@ -300,7 +300,8 @@ func serveDaemon(c *mcp.Client, ln, voiceLn net.Listener, opts daemonOptions) er
 
 	// IPC is served right away; the device connection is only watched, so
 	// commands (e.g. status) never hang while the device is away.
-	daemonSpeech = &speech{} // before anything can say (wake.txt, notices, commands)
+	daemonSpeech = &speech{}     // before anything can say (wake.txt, notices, commands)
+	daemonURLOffer = &urlOffer{} // before any command can run
 	sl := newSleeper(opts.sleep, c, opts.avatar)
 	daemonSleeper = sl // before any command can run
 	fmt.Fprintf(os.Stderr, "daemon: sleeps %s and on the sleep command (touch sensor off, reactions sleep.txt / wake.txt)\n", opts.sleep)
@@ -504,7 +505,9 @@ func reactToTouches(c *mcp.Client, touches <-chan touchEvent, sl *sleeper, timer
 			// answering touch stops it too (the notice asks for that answer).
 			// The loop waits during a reaction, so the speech is someone
 			// else's (an ask answer, a notice), not the reaction's own.
-			answered := timers != nil && answerByTouch(timers, ev.at)
+			// The pomodoro's answer comes first: it does not move on without
+			// one, while a page asked about is dropped after a minute.
+			answered := timers != nil && answerByTouch(timers, ev.at) || answerURLByTouch(c, ev.at)
 			stopped := stopSpeaking(ev.at)
 			if stopped {
 				fmt.Fprintln(os.Stderr, "daemon: speech stopped by touch")

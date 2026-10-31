@@ -381,6 +381,10 @@ func runVoice(heard string, e cmdEnv) error {
 		fmt.Fprintf(e.errOut, "voice: heard %q -> the answer the pomodoro waits for\n", heard)
 		return cmdPomodoro([]string{"ok"}, e)
 	}
+	// Likewise while a page from ask is asked about: a short yes or no.
+	if answerURLByVoice(heard, e) {
+		return nil
+	}
 	vr, err := loadVoiceRules()
 	if err != nil {
 		return err

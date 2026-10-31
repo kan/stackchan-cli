@@ -846,6 +846,26 @@ M5 ｽﾀｯｸﾁｬﾝ（M5Stack 公式 AI デスクトップロボット）�
 - 実測（GPU の VOICEVOX）: 3 文で、文ごとに呼んでも 1 回で呼んでも合計約 4.9 秒（差は 0.2 秒以内）。
   CPU の VOICEVOX では、文の間に合成の待ちが入る（未測定）。
 
+## 2026-10-31 更新log（ask の答えの URL を開く・issue #9）
+
+- `askurl.go`。答えから `http(s)` の URL を取り出し（Markdown のリンクは文字だけ残す）、読み上げる文から除く。
+  daemon では答えのあとに「パソコンでページを開く？」と話し、最初の 1 件を 1 分待つ（`urlOffer`。ユーザー決定）。
+  待ち始めは問いかけを話す前（話している最中のタッチも返事になる）。それより前のタッチは返事にしない。
+  答えが止められた（`speech.stops` が変わった）ときは聞かない。開いたら「開いたよ」、断られたら「わかった、開かないね」と話す
+  （頭のタッチのときは、タッチのループを止めないよう別の goroutine で話す）。
+- URL の切り出し: ひらがなの手前で止める（「…/を見てね」）。漢字とカタカナはページ名にあるので含める。末尾の `)` は、
+  URL の中で開いた括弧（`Foo_(bar)`）なら残す。整えるのは URL のあった行だけ。
+- 返事: 頭のタッチ（`answerURLByTouch`）、声の短い返事（`runVoice` の `answerURLByVoice`）、`ask --open`。声の
+  はいは `openWords`（ポモドーロの `answerWords` に「開いて」「うん」「お願い」などを足したもの）、いいえは `isDecline` で
+  判定する（どちらも `isShortReply`）。どれも待っていないときは通常の音声ルールへ回す。ポモドーロの応答待ちを先に見る（ユーザー決定）。次の `ask` で前の待ちは
+  取り消す。one-shot（daemon なし）は聞かずに表示だけ（ユーザー決定）。出典の一覧（`splitSources` が削る）は対象にしない（ユーザー決定）。
+- ブラウザは `rundll32 url.dll,FileProtocolHandler <URL>` を `startDetached` で起動する（`cmd /c start` は URL の `&` を
+  解釈する。Job の外で起動しないと daemon の停止でブラウザも終わるおそれがある）。タスクスケジューラから起動した daemon でも、
+  デスクトップの既定のブラウザで開いた（実機で確認）。
+- `ask/system.txt` の雛形: 見るとよいページがあるときだけ URL を最後の行に 1 つ書き、文の中には URL とドメイン名を書かない。
+  ドメイン名の指示が無いと「m5stack.com」を文の中に書き、VOICEVOX が英字を読み上げた。この PC の `system.txt` は書き換え済み。
+  前の会話の続き（`--resume`）では、前の答え方に引きずられて文の中にドメイン名を書いた（新しい会話では書かなかった）。
+
 ## 参照ファイル早見
 - 公式アプリ通信: `app/lib/network/{urls,http,web_socket_util}.dart`, `app/lib/model/msg_type.dart`
 - 公式デバイス: `firmware/main/apps/app_avatar/app_avatar.cpp`, `.../view/ws_call.cpp`,

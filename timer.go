@@ -621,15 +621,19 @@ var (
 )
 
 // isAnswer reports whether heard reads as a short yes.
-func isAnswer(heard string) bool {
+func isAnswer(heard string) bool { return isShortReply(heard, answerWords, answerEndings) }
+
+// isShortReply reports whether heard (after the name) is one of words, said
+// once or twice, and at most one of endings. words are normalized already.
+func isShortReply(heard string, words, endings []string) bool {
 	h := strings.TrimPrefix(normalizeSpeech(heard), "すたっくちゃん")
-	for _, w := range answerWords {
+	for _, w := range words {
 		rest, ok := strings.CutPrefix(h, w)
 		if !ok {
 			continue
 		}
 		rest = strings.TrimPrefix(rest, w)
-		if slices.Contains(answerEndings, rest) {
+		if slices.Contains(endings, rest) {
 			return true
 		}
 	}

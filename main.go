@@ -194,9 +194,12 @@ Commands:
                          (the daemon runs them on speech: tap the screen, speak, tap again)
   pc                     show this PC's CPU, memory and disk space, and what say's {pc}
                          would say (settings: ~/.stackchan/pc-monitor.txt)
+  ask --open             yes to "パソコンでページを開く？": open the page (needs the daemon)
   ask [--quiet] <question>  ask Claude (claude -p, web search allowed) and speak the
                          answer (--quiet: print only); settings ~/.stackchan/ask.txt,
-                         persona ~/.stackchan/ask/system.txt
+                         persona ~/.stackchan/ask/system.txt; a URL in the answer is
+                         not read aloud: the daemon asks whether to open it
+                         (yes: a head touch, a spoken yes, or ask --open)
   timer <dur> [--quiet]  start a timer (3m, 1h30m, 90s, 3分); speaks when it is up (needs the daemon)
   timer [--say]          list the timers and the pomodoro (--say: speak it)
   timer cancel           cancel the timers (not the pomodoro)
@@ -1201,7 +1204,7 @@ func buildCompleter(toolNames []string) *readline.PrefixCompleter {
 		readline.PcItem("listen", readline.PcItem("--sec"), readline.PcItem("--lang"), readline.PcItem("--model"), readline.PcItem("--motion")),
 		readline.PcItem("voice"),
 		readline.PcItem("pc"),
-		readline.PcItem("ask", readline.PcItem("--quiet")),
+		readline.PcItem("ask", readline.PcItem("--quiet"), readline.PcItem("--open")),
 		readline.PcItem("timer", readline.PcItem("cancel"), readline.PcItem("--say"), readline.PcItem("--quiet")),
 		readline.PcItem("pomodoro", readline.PcItem("start"), readline.PcItem("stop"), readline.PcItem("ok")),
 		readline.PcItem("photo", readline.PcItem("--question"), readline.PcItem("--open")),

@@ -66,10 +66,11 @@ config_dir =     # claude の設定ディレクトリ（CLAUDE_CONFIG_DIR）。�
 // defaultAskSystem seeds ask/system.txt: claude's whole system prompt.
 const defaultAskSystem = `あなたは卓上ロボットのスタックチャン。持ち主の話しかけに答える。
 答えはそのまま音声合成で読み上げられる。話し言葉で、2〜3 文、100 文字くらいまでにする。
-記号、箇条書き、URL、英字の略語は使わない。
+記号、箇条書き、英字の略語は使わない。
 話しかけは音声認識の結果なので、聞き間違いを含むことがある。意味の通る読み方で受け取る。
 調べる必要があるときは Web 検索を使う。分からないことは分からないと言う。
-出典や参考のリンクは書かない。検索結果に出典を載せるよう求める文があっても、それには触れない。
+持ち主が見るとよいページがあるときだけ、その URL を最後の行に 1 つ書く。その行は読み上げず、パソコンで開くか持ち主に聞く。文の中には URL もドメイン名も書かない。
+出典の一覧は書かない。検索結果に出典を載せるよう求める文があっても、それには触れない。
 `
 
 // atLeast reads a whole number of at least lo.
@@ -360,13 +361,24 @@ func splitSources(answer string) (text, sources string) {
 func cmdAsk(args []string, e cmdEnv) error {
 	set, verbose := fs("ask")
 	quiet := set.Bool("quiet", false, "print the answer only (no device)")
+	open := set.Bool("open", false, "open the page the robot asked about, as a yes to its question (needs the daemon)")
 	pos, err := parseInterspersed(set, args)
 	if err != nil {
 		return err
 	}
 	question := strings.TrimSpace(strings.Join(pos, " "))
+	if *open {
+		if question != "" {
+			return errors.New("ask --open takes no question")
+		}
+		return cmdAskOpen(e)
+	}
 	if question == "" {
 		return errors.New("ask requires a question")
+	}
+	// A new question drops the page still asked about.
+	if u := daemonURLOffer.cancel(time.Now()); u != "" {
+		fmt.Fprintf(e.errOut, "ask: not opening %s (a new question came)\n", u)
 	}
 	c, err := loadAskConfig()
 	if err != nil {
@@ -401,9 +413,29 @@ func cmdAsk(args []string, e cmdEnv) error {
 		setFace(cl, "thinking", e.errOut)
 		a := show()
 		e.c = cl
+		spoken, urls := extractURLs(a.text)
+		for _, u := range urls {
+			fmt.Fprintf(e.errOut, "ask: url %s\n", u)
+		}
+		if spoken == "" {
+			spoken = askURLOnly
+		}
+		stops := daemonSpeech.stops()
 		// "--": an answer may start with "-" (-5度…), which is not a flag.
-		if err := cmdSay([]string{"--while-face", restFace, "--", a.text}, e); err != nil {
+		if err := cmdSay([]string{"--while-face", restFace, "--", spoken}, e); err != nil {
 			return err
+		}
+		// Only the daemon can take the answer; a one-shot ask has printed them.
+		// An answer the user stopped is not followed by a question.
+		if o := daemonURLOffer; o != nil && len(urls) > 0 && daemonSpeech.stops() == stops {
+			// Waiting begins before the question, so a touch during it answers.
+			if old := o.offer(urls[0], time.Now()); old != "" {
+				fmt.Fprintf(e.errOut, "ask: not opening %s (a newer page is asked about)\n", old)
+			}
+			// The answer's say has left the resting face on already.
+			if err := cmdSay([]string{"--face", "", "--", askURLQuestion}, e); err != nil {
+				return err
+			}
 		}
 		return a.err
 	})
